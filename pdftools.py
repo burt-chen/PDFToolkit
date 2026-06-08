@@ -38,10 +38,24 @@ def app_dir():
 
 FEATURES = [
     {
+        "id": "viewer",
+        "name": "開啟 / 檢視 PDF",
+        "category": "檢視",
+        "module": "features.viewer",
+        "factory": "create_frame",
+    },
+    {
         "id": "splitter",
         "name": "分割 PDF",
         "category": "頁面操作",
         "module": "features.splitter",
+        "factory": "create_frame",
+    },
+    {
+        "id": "replace_text",
+        "name": "文字取代",
+        "category": "文字處理",
+        "module": "features.replace_text",
         "factory": "create_frame",
     },
 ]
@@ -71,6 +85,10 @@ class App:
 
         self._iid_to_feat = {}
         self._current_id = None
+        # 各功能畫面快取:切換時只隱藏不銷毀,讓已開啟的內容(如檢視中的 PDF)持續存在
+        self._feature_frames = {}
+        self._placeholder = None
+        self._error_widget = None
 
         if not embed:
             self._setup_style()
@@ -101,19 +119,37 @@ class App:
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
-        paned = ttk.PanedWindow(self.root, orient="horizontal")
-        paned.pack(fill="both", expand=True)
+        self.sidebar_visible = True
+        ttk.Style().configure(
+            "Sidebar.Toggle.TButton",
+            font=("Microsoft JhengHei UI", 16, "bold"), padding=[0, 8])
+
+        # 收合後才顯示的左側細把手(▶ 展開);展開時不顯示
+        self.rail = ttk.Frame(self.root, width=26)
+        self.rail.pack_propagate(False)
+        self.btn_expand = ttk.Button(
+            self.rail, text="▶", style="Sidebar.Toggle.TButton",
+            command=self._toggle_sidebar)
+        self.btn_expand.pack(fill="both", expand=True, padx=1, pady=1)
+
+        self.paned = paned = ttk.PanedWindow(self.root, orient="horizontal")
+        paned.pack(side="left", fill="both", expand=True)
 
         # 左側 sidebar
-        sidebar = ttk.Frame(paned, width=240)
+        self.sidebar = sidebar = ttk.Frame(paned, width=240)
         sidebar.pack_propagate(False)
         paned.add(sidebar, weight=0)
 
-        title = ttk.Label(
-            sidebar, text="  PDF 工具",
+        # 標題列:「PDF 工具」+ 收合鈕(◀)
+        title_bar = ttk.Frame(sidebar)
+        title_bar.pack(fill="x", padx=4, pady=(10, 6))
+        ttk.Label(
+            title_bar, text="PDF 工具",
             font=("Microsoft JhengHei UI", 15, "bold"),
-            anchor="w")
-        title.pack(fill="x", padx=4, pady=(10, 6))
+            anchor="w").pack(side="left")
+        self.btn_collapse = ttk.Button(
+            title_bar, text="◀", width=3, command=self._toggle_sidebar)
+        self.btn_collapse.pack(side="right")
         ttk.Separator(sidebar, orient="horizontal").pack(fill="x", padx=4)
 
         self.tree = ttk.Treeview(
@@ -140,7 +176,7 @@ class App:
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        # 右側 content 容器(每次切換 destroy 舊 frame)
+        # 右側 content 容器(切換時隱藏舊 frame、保留其狀態,不銷毀)
         self.content = ttk.Frame(paned)
         paned.add(self.content, weight=1)
 
@@ -151,6 +187,18 @@ class App:
             first_iid = next(iter(self._iid_to_feat))
             self.tree.selection_set(first_iid)
             self.tree.focus(first_iid)
+
+    # ------------------------------------------------------------ 側邊欄收合
+    def _toggle_sidebar(self):
+        if self.sidebar_visible:
+            # 收合:藏起側邊欄,左側改顯示細把手(▶)
+            self.paned.forget(self.sidebar)
+            self.rail.pack(side="left", fill="y", before=self.paned)
+        else:
+            # 展開:藏起把手,側邊欄放回
+            self.rail.pack_forget()
+            self.paned.insert(0, self.sidebar, weight=0)
+        self.sidebar_visible = not self.sidebar_visible
 
     # ---------------------------------------------------------------- 切換
     def _on_select(self, _event=None):
@@ -163,37 +211,52 @@ class App:
         self._show_feature(feat)
 
     def _show_placeholder(self):
-        self._clear_content()
-        ttk.Label(
-            self.content,
-            text="請從左側選擇功能",
-            foreground="#888",
-            font=("Microsoft JhengHei UI", 14)).pack(expand=True)
+        if self._placeholder is None:
+            self._placeholder = ttk.Frame(self.content)
+            ttk.Label(
+                self._placeholder,
+                text="請從左側選擇功能",
+                foreground="#888",
+                font=("Microsoft JhengHei UI", 14)).pack(expand=True)
+        self._placeholder.pack(fill="both", expand=True)
 
-    def _clear_content(self):
-        for c in self.content.winfo_children():
-            c.destroy()
+    def _hide_current(self):
+        """隱藏目前顯示的內容(placeholder / 上一個功能 / 錯誤訊息),但不銷毀。"""
+        if self._placeholder is not None:
+            self._placeholder.pack_forget()
+        if self._current_id and self._current_id in self._feature_frames:
+            self._feature_frames[self._current_id].pack_forget()
+        if self._error_widget is not None:
+            self._error_widget.destroy()
+            self._error_widget = None
 
     def _show_feature(self, feat):
         if self._current_id == feat["id"]:
             return
-        self._clear_content()
-        try:
-            mod = importlib.import_module(feat["module"])
-            factory = getattr(mod, feat.get("factory", "create_frame"))
-            kwargs = dict(feat.get("kwargs") or {})
-            # 共用 presets_dir(嵌入 launcher 時由外部覆寫)
-            if self.presets_dir is not None and "presets_dir" not in kwargs:
-                kwargs["presets_dir"] = self.presets_dir
-            frame = factory(self.content, **kwargs)
-            frame.pack(fill="both", expand=True)
-            self._current_id = feat["id"]
-        except Exception as e:
-            ttk.Label(
-                self.content,
-                text=f"載入「{feat['name']}」失敗：\n{e}",
-                foreground="#a00", font=FONT,
-                justify="left").pack(expand=True, padx=20, pady=20)
+        self._hide_current()
+        fid = feat["id"]
+        frame = self._feature_frames.get(fid)
+        if frame is None:
+            # 第一次進入此功能 → 建立並快取;之後切回沿用同一個(狀態保留)
+            try:
+                mod = importlib.import_module(feat["module"])
+                factory = getattr(mod, feat.get("factory", "create_frame"))
+                kwargs = dict(feat.get("kwargs") or {})
+                # 共用 presets_dir(嵌入 launcher 時由外部覆寫)
+                if self.presets_dir is not None and "presets_dir" not in kwargs:
+                    kwargs["presets_dir"] = self.presets_dir
+                frame = factory(self.content, **kwargs)
+                self._feature_frames[fid] = frame
+            except Exception as e:
+                self._error_widget = ttk.Label(
+                    self.content,
+                    text=f"載入「{feat['name']}」失敗：\n{e}",
+                    foreground="#a00", font=FONT, justify="left")
+                self._error_widget.pack(expand=True, padx=20, pady=20)
+                self._current_id = None
+                return
+        frame.pack(fill="both", expand=True)
+        self._current_id = fid
 
 
 def main():

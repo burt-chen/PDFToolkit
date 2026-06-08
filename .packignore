@@ -1,0 +1,3 @@
+# pdf2 專屬打包排除（每行一個 glob，# 開頭為註解）
+# 被 launcher 載入時各功能的設定檔讀 ~/.pdf2/，不需打包 repo 內的：
+presets.json
