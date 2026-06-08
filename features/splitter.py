@@ -447,7 +447,10 @@ class App:
         self.presets = PresetStore(self.presets_path)
         self._edit_widget = None
 
-        self._setup_style()
+        # 嵌入(root 是 Frame)時不動全域 ttk 樣式/字型,否則 theme_use 與
+        # option_add("*Font") 會擴散到 launcher 與其他工具的 UI
+        if isinstance(root, (tk.Tk, tk.Toplevel)):
+            self._setup_style()
         self._build_ui()
         self._refresh_preset_combo()
 

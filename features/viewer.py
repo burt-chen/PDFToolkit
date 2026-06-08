@@ -11,11 +11,14 @@
   • 上一頁 / 下一頁 / 跳頁(捲動到該頁)
   • 放大 / 縮小、適合寬度、適合頁面、Ctrl+滾輪縮放
   • 隨捲動延遲渲染:只繪製可視範圍內的頁面,大檔也不卡、省記憶體
+  • 文字搜尋(Ctrl+F):右側面板列出所有符合處,點選即跳頁並以螢光框標示;
+    可選「區分大小寫 / 整字」
 
 備註:以 PyMuPDF 把每頁渲染成點陣圖顯示,不支援選取文字;
-要取出文字請改用其他功能。
+但可用上方搜尋功能定位文字。
 """
 
+import re
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -71,7 +74,14 @@ class App:
         self._resize_job = None
         self._vis_job = None
 
-        self._setup_style()
+        # 搜尋狀態
+        self.search_visible = False
+        self._matches = []               # [{page, rect(x0,y0,x1,y1), snippet}]
+        self._active_match = None        # 目前標示的那一筆
+
+        # 嵌入時不動全域 ttk 樣式/字型(同 splitter.py 處理)
+        if isinstance(root, (tk.Tk, tk.Toplevel)):
+            self._setup_style()
         self._build_ui()
 
     # ---- 樣式 ----
@@ -118,9 +128,18 @@ class App:
         cmb.pack(side="left")
         cmb.bind("<<ComboboxSelected>>", self._on_cols_changed)
 
-        # 檢視區(Canvas + 雙捲軸)
-        wrap = ttk.Frame(self.root)
-        wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        # 搜尋面板切換(預設隱藏,亦可按 Ctrl+F)
+        ttk.Button(bar, text="🔍 搜尋", command=self._toggle_search).pack(
+            side="right")
+
+        # 檢視區容器:左=畫布(+雙捲軸)、右=搜尋面板
+        content = ttk.Frame(self.root)
+        content.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        self.search_panel = self._build_search_panel(content)   # 建好但尚未 pack
+        wrap = ttk.Frame(content)
+        wrap.pack(side="left", fill="both", expand=True)
+        self._wrap = wrap
+
         self.canvas = tk.Canvas(wrap, background="#666666",
                                 highlightthickness=0)
         self.vsb = ttk.Scrollbar(wrap, orient="vertical",
@@ -146,6 +165,7 @@ class App:
         self.canvas.bind("<Button-1>", lambda _e: self.canvas.focus_set())
         self.canvas.bind("<Prior>", lambda _e: self.prev_page())   # PageUp
         self.canvas.bind("<Next>", lambda _e: self.next_page())    # PageDown
+        self.root.bind_all("<Control-f>", self._focus_search)
         self._setup_dnd()
 
         self.lbl_status = ttk.Label(self.root, text="", foreground="#555",
@@ -215,6 +235,7 @@ class App:
         self.canvas.itemconfigure(self._hint_id, text="")
         self.lbl_total.config(text=f"/ {len(doc)}")
         self.lbl_status.config(text=f"{Path(path).name}（共 {len(doc)} 頁）")
+        self._clear_search()
         self._build_pages()
         self.canvas.yview_moveto(0.0)
         self._reflow()
@@ -363,6 +384,7 @@ class App:
         if keep_page:
             self._scroll_to_page(self.page_index)
         self._render_visible()
+        self._draw_highlight()
 
     # ----------------------------------------------------------------- 渲染
     def _ensure_rendered(self, i):
@@ -454,6 +476,182 @@ class App:
     def _on_wheel_ctrl(self, evt):
         self.zoom_in() if evt.delta > 0 else self.zoom_out()
         return "break"
+
+    # ----------------------------------------------------------------- 搜尋
+    def _build_search_panel(self, parent):
+        """建立右側搜尋面板(回傳 Frame,呼叫端決定何時顯示)。"""
+        panel = ttk.Frame(parent, width=300)
+        panel.pack_propagate(False)              # 固定寬度,不被內容撐開
+
+        top = ttk.Frame(panel)
+        top.pack(fill="x", padx=8, pady=(8, 4))
+        self.var_search = tk.StringVar()
+        ent = ttk.Entry(top, textvariable=self.var_search)
+        ent.pack(side="left", fill="x", expand=True)
+        ent.bind("<Return>", self._do_search)
+        ent.bind("<Escape>", lambda _e: self._toggle_search())
+        self._search_entry = ent
+        ttk.Button(top, text="搜尋", command=self._do_search).pack(
+            side="left", padx=(6, 0))
+
+        opts = ttk.Frame(panel)
+        opts.pack(fill="x", padx=8)
+        self.var_case = tk.BooleanVar(value=False)
+        self.var_whole = tk.BooleanVar(value=False)
+        # 切換選項時若已有關鍵字則立即重新搜尋
+        ttk.Checkbutton(opts, text="區分大小寫", variable=self.var_case,
+                        command=self._do_search).pack(side="left")
+        ttk.Checkbutton(opts, text="整字", variable=self.var_whole,
+                        command=self._do_search).pack(side="left", padx=(12, 0))
+
+        self.lbl_results = ttk.Label(panel, text="", foreground="#555")
+        self.lbl_results.pack(fill="x", padx=8, pady=(6, 2))
+
+        tvwrap = ttk.Frame(panel)
+        tvwrap.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.tv = ttk.Treeview(tvwrap, show="tree", selectmode="browse")
+        tvsb = ttk.Scrollbar(tvwrap, orient="vertical", command=self.tv.yview)
+        self.tv.configure(yscrollcommand=tvsb.set)
+        self.tv.pack(side="left", fill="both", expand=True)
+        tvsb.pack(side="right", fill="y")
+        self.tv.bind("<<TreeviewSelect>>", self._on_result_select)
+        return panel
+
+    def _toggle_search(self):
+        if self.search_visible:
+            self.search_panel.pack_forget()
+            self.search_visible = False
+        else:
+            self.search_panel.pack(side="right", fill="y", before=self._wrap)
+            self.search_visible = True
+            self._search_entry.focus_set()
+
+    def _focus_search(self, _evt=None):
+        """Ctrl+F:展開面板並聚焦輸入框。"""
+        if not self.search_visible:
+            self._toggle_search()
+        else:
+            self._search_entry.focus_set()
+            self._search_entry.select_range(0, "end")
+        return "break"
+
+    def _clear_search(self):
+        self._matches = []
+        self._active_match = None
+        if hasattr(self, "tv"):
+            self.tv.delete(*self.tv.get_children())
+        if hasattr(self, "lbl_results"):
+            self.lbl_results.config(text="")
+        self.canvas.delete("search_hl")
+
+    def _do_search(self, _evt=None):
+        if not hasattr(self, "tv"):
+            return
+        self.tv.delete(*self.tv.get_children())
+        self._matches = []
+        self._active_match = None
+        self.canvas.delete("search_hl")
+        needle = self.var_search.get().strip()
+        if not self.doc or not needle:
+            self.lbl_results.config(text="")
+            return
+        try:
+            matches = self._collect_matches(
+                needle, self.var_case.get(), self.var_whole.get())
+        except Exception as e:
+            self.lbl_results.config(text=f"搜尋失敗:{e}")
+            return
+        self._matches = matches
+        for i, m in enumerate(matches):
+            label = f"第 {m['page'] + 1} 頁   {m['snippet']}"
+            self.tv.insert("", "end", iid=str(i), text=label)
+        self.lbl_results.config(
+            text=f"共找到 {len(matches)} 筆結果" if matches else "沒有符合的結果")
+
+    def _collect_matches(self, needle, case, whole):
+        """掃描全部頁面,回傳每個出現處的 {page, rect, snippet}。
+
+        以 PyMuPDF 的 search_for 取得矩形(不分大小寫的子字串比對),
+        再依「區分大小寫 / 整字」過濾,確保清單與螢光標示一致。"""
+        out = []
+        for pno in range(len(self.doc)):
+            page = self.doc[pno]
+            try:
+                rects = page.search_for(needle)
+            except Exception:
+                continue
+            for r in rects:
+                if case:
+                    got = (page.get_textbox(r) or "").strip()
+                    if needle not in got:        # 大小寫不符 → 略過
+                        continue
+                snippet = self._line_snippet(page, r, needle)
+                if whole and not self._whole_word(snippet, needle, case):
+                    continue
+                out.append({"page": pno,
+                            "rect": (r.x0, r.y0, r.x1, r.y1),
+                            "snippet": snippet})
+        return out
+
+    def _line_snippet(self, page, r, needle, span=24):
+        """取出符合處所在「整行」的文字,並裁切到關鍵字前後約 span 個字。"""
+        band = self.fitz.Rect(0, r.y0 - 1, page.rect.width, r.y1 + 1)
+        try:
+            text = " ".join((page.get_textbox(band) or "").split())
+        except Exception:
+            text = ""
+        pos = text.lower().find(needle.lower())
+        if pos < 0:
+            return text[:span * 2].strip()
+        a, b = max(0, pos - span), min(len(text), pos + len(needle) + span)
+        s = text[a:b].strip()
+        return ("…" if a > 0 else "") + s + ("…" if b < len(text) else "")
+
+    @staticmethod
+    def _whole_word(snippet, needle, case):
+        """整字:關鍵字前後不可緊鄰英數字(對中文無邊界概念,等同永遠成立)。"""
+        flags = 0 if case else re.IGNORECASE
+        pat = r"(?<![0-9A-Za-z])" + re.escape(needle) + r"(?![0-9A-Za-z])"
+        return re.search(pat, snippet, flags) is not None
+
+    def _on_result_select(self, _evt=None):
+        sel = self.tv.selection()
+        if not sel:
+            return
+        try:
+            self._goto_match(self._matches[int(sel[0])])
+        except (ValueError, IndexError):
+            pass
+
+    def _goto_match(self, m):
+        """跳到該筆所在頁,讓符合處約位於可視區上方 1/4,並畫螢光框。"""
+        self._active_match = m
+        page = m["page"]
+        if self.layout and self._content_h > 0:
+            lay = self.layout[page]
+            y = lay["y"] + m["rect"][1] * self.scale \
+                - self.canvas.winfo_height() * 0.25
+            self.canvas.yview_moveto(max(0.0, min(y / self._content_h, 1.0)))
+        self.page_index = page
+        self.var_page.set(str(page + 1))
+        self._render_visible()
+        self._draw_highlight()
+
+    def _draw_highlight(self):
+        """把目前選取的符合處畫成螢光框(座標依目前 scale 即時換算)。"""
+        self.canvas.delete("search_hl")
+        m = self._active_match
+        if not m or not self.layout:
+            return
+        lay = self.layout[m["page"]]
+        x0, y0, x1, y1 = m["rect"]
+        s = self.scale
+        self.canvas.create_rectangle(
+            lay["x"] + x0 * s - 2, lay["y"] + y0 * s - 1,
+            lay["x"] + x1 * s + 2, lay["y"] + y1 * s + 1,
+            outline="#d40000", width=2, fill="#ffe14d", stipple="gray50",
+            tags=("search_hl",))
+        self.canvas.tag_raise("search_hl")
 
 
 def create_frame(parent, presets_dir=None):

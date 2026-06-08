@@ -305,7 +305,9 @@ class App:
         # 掃描結果:list of {path, name, hits, has_text, error}
         self.results = []
 
-        self._setup_style()
+        # 嵌入時不動全域 ttk 樣式/字型(同 splitter.py 處理)
+        if isinstance(root, (tk.Tk, tk.Toplevel)):
+            self._setup_style()
         self._build_ui()
 
     # ---- 樣式 ----
