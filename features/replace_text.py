@@ -374,9 +374,21 @@ class App:
         self.tab_main = ttk.Frame(self.notebook)
         self.tab_help = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_main, text="取代")
+        self._build_compare_tab()                 # 「比對」分頁(取代與說明之間)
         self.notebook.add(self.tab_help, text="說明")
         self._build_main_tab()
         self._build_help_tab()
+
+    def _build_compare_tab(self):
+        self.tab_compare = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_compare, text="比對")
+        self._cmp_built = False
+        self._cmp_hint = ttk.Label(
+            self.tab_compare,
+            text="在「取代」分頁的掃描結果上按右鍵 →「並排比對：原始 vs 取代後」，"
+                 "比對結果會顯示在這裡。",
+            foreground="#888")
+        self._cmp_hint.pack(expand=True)
 
     def _build_main_tab(self):
         f = self.tab_main
@@ -723,59 +735,67 @@ class App:
                 messagebox.showerror("錯誤", f"無法開啟預覽:\n{e}")
 
     def _compare_selected(self, _evt=None):
-        """右鍵「並排比對」:開一個視窗,左邊原始檔、右邊取代後預覽。"""
+        """右鍵「並排比對」:在「比對」分頁左右並排顯示原始與取代後。"""
         prep = self._prepare_replaced()
         if prep is None:
             return
         r, data, n = prep
-        self._open_compare_window(r["name"], r["path"], data, n)
+        try:
+            orig = Path(r["path"]).read_bytes()    # 以 bytes 顯示,不鎖住原檔
+        except Exception as e:
+            messagebox.showerror("錯誤", f"無法讀取原始檔：\n{e}")
+            return
+        self._show_compare_in_tab(r["name"], orig, data, n)
 
-    def _open_compare_window(self, name, path, data, n):
-        """左右並排兩個檢視器:左=原始(檔案)、右=取代後(記憶體 bytes)。"""
+    def _show_compare_in_tab(self, name, orig_bytes, data, n):
+        """在「比對」分頁建立(或重用)兩個並排檢視器並載入內容,然後切到該分頁。"""
         try:
             viewer = _load_viewer_module()
         except Exception as e:
-            messagebox.showerror("錯誤", f"無法載入檢視器:\n{e}")
+            messagebox.showerror("錯誤", f"無法載入檢視器：\n{e}")
             return
-        win = tk.Toplevel(self.root)
-        win.title(f"取代前後比對 — {name}")
-        win.geometry("1400x860")
+        bold = ("Microsoft JhengHei UI", 12, "bold")
+        if not self._cmp_built:
+            self._cmp_hint.destroy()
+            bar = ttk.Frame(self.tab_compare)
+            bar.pack(fill="x", padx=6, pady=(6, 0))
+            self._cmp_title = ttk.Label(bar, text="", font=bold)
+            self._cmp_title.pack(side="left")
+            paned = ttk.PanedWindow(self.tab_compare, orient="horizontal")
+            paned.pack(fill="both", expand=True, padx=6, pady=6)
+            left = ttk.Frame(paned)
+            paned.add(left, weight=1)
+            ttk.Label(left, text="原始檔案", font=bold).pack(
+                anchor="w", padx=6, pady=(4, 0))
+            self._cmp_lv = viewer.create_frame(left)
+            self._cmp_lv.pack(fill="both", expand=True)
+            right = ttk.Frame(paned)
+            paned.add(right, weight=1)
+            self._cmp_rlabel = ttk.Label(right, text="", font=bold,
+                                         foreground="#067")
+            self._cmp_rlabel.pack(anchor="w", padx=6, pady=(4, 0))
+            self._cmp_rv = viewer.create_frame(right)
+            self._cmp_rv.pack(fill="both", expand=True)
+            self._cmp_paned = paned
+            self._cmp_built = True
+            self.tab_compare.after(150, self._center_cmp_sash)
+
+        self._cmp_title.config(text=f"比對：{name}")
+        self._cmp_rlabel.config(
+            text=(f"取代後預覽（{n} 處）" if n
+                  else "取代後預覽（未命中，與原檔相同）"))
+        # 延遲載入:等分頁布局好,檢視器才算得出「適合頁面」的縮放
+        self.tab_compare.after(
+            60, lambda: self._cmp_lv.app.open_bytes(orig_bytes, f"{name}（原始）"))
+        self.tab_compare.after(
+            60, lambda: self._cmp_rv.app.open_bytes(data, f"{name}（取代後）"))
+        self.notebook.select(self.tab_compare)
+
+    def _center_cmp_sash(self):
         try:
-            win.state("zoomed")
-        except tk.TclError:
+            self._cmp_paned.sashpos(0, max(200, self._cmp_paned.winfo_width() // 2))
+        except Exception:
             pass
-
-        paned = ttk.PanedWindow(win, orient="horizontal")
-        paned.pack(fill="both", expand=True)
-
-        left = ttk.Frame(paned)
-        paned.add(left, weight=1)
-        ttk.Label(left, text="原始檔案",
-                  font=("Microsoft JhengHei UI", 12, "bold")).pack(
-                      anchor="w", padx=8, pady=(6, 0))
-        lv = viewer.create_frame(left)
-        lv.pack(fill="both", expand=True)
-
-        right = ttk.Frame(paned)
-        paned.add(right, weight=1)
-        rtitle = (f"取代後預覽（{n} 處）" if n
-                  else "取代後預覽（未命中，與原檔相同）")
-        ttk.Label(right, text=rtitle,
-                  font=("Microsoft JhengHei UI", 12, "bold"),
-                  foreground="#067").pack(anchor="w", padx=8, pady=(6, 0))
-        rv = viewer.create_frame(right)
-        rv.pack(fill="both", expand=True)
-
-        # 延遲載入(等視窗布局好,檢視器才算得出適合頁面的縮放)並把分隔線置中
-        win.after(60, lambda: lv.app.open_path(path))
-        win.after(60, lambda: rv.app.open_bytes(data, f"{name}（取代後）"))
-
-        def _center_sash():
-            try:
-                paned.sashpos(0, max(200, win.winfo_width() // 2))
-            except Exception:
-                pass
-        win.after(150, _center_sash)
 
     # ----------------------------------------------------------------- 取代
     def _run_replace(self):
