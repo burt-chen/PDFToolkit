@@ -48,6 +48,21 @@ def _import_fitz():
         )
 
 
+def _load_viewer_module():
+    """載入同目錄的 viewer 模組(供「檢視」分頁預覽切割頁面用)。
+    先試套件匯入(透過 launcher);失敗則以檔案路徑載入(獨立執行)。"""
+    try:
+        from features import viewer as mod
+        return mod
+    except Exception:
+        import importlib.util
+        vp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer.py")
+        spec = importlib.util.spec_from_file_location("viewer", vp)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+
 # ===========================================================================
 #  core/detector — 四種偵測（純函式，可單元測試）
 # ===========================================================================
@@ -477,10 +492,22 @@ class App:
         self.tab_main = ttk.Frame(self.notebook)
         self.tab_help = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_main, text="切割")
+        self._build_view_tab()                 # 「檢視」分頁(切割與說明之間)
         self.notebook.add(self.tab_help, text="說明")
 
         self._build_main_tab()
         self._build_help_tab()
+
+    def _build_view_tab(self):
+        self.tab_view = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_view, text="檢視")
+        self._view_body = None
+        self._view_hint = ttk.Label(
+            self.tab_view,
+            text="在「切割」分頁的預覽結果上按右鍵 →「檢視」，"
+                 "即可在此預覽該份切割的頁面。",
+            foreground="#888")
+        self._view_hint.pack(expand=True)
 
     # ----------------------------------------------------------------- 主分頁
     def _build_main_tab(self):
@@ -539,7 +566,8 @@ class App:
             side="left", padx=4, pady=6)
 
         # 預覽表
-        prev = ttk.LabelFrame(f, text="3. 預覽結果（雙擊欄位可編輯）")
+        prev = ttk.LabelFrame(
+            f, text="3. 預覽結果（雙擊欄位可編輯；右鍵可檢視該份頁面）")
         prev.pack(fill="both", expand=True, padx=8, pady=4)
         cols = ("name", "start", "end")
         self.tree = ttk.Treeview(prev, columns=cols, show="headings", height=8)
@@ -554,6 +582,10 @@ class App:
         self.tree.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         vsb.pack(side="left", fill="y", pady=4)
         self.tree.bind("<Double-1>", self._on_tree_dblclick)
+        # 右鍵選單:檢視該份切割的頁面
+        self.row_menu = tk.Menu(self.tree, tearoff=0)
+        self.row_menu.add_command(label="檢視", command=self._view_selected_split)
+        self.tree.bind("<Button-3>", self._on_tree_rightclick)
 
         btns = ttk.Frame(prev)
         btns.pack(side="left", fill="y", padx=6, pady=4)
@@ -906,6 +938,80 @@ class App:
                 pass
             self._edit_widget = None
 
+    # ----------------------------------------------------------------- 檢視
+    def _on_tree_rightclick(self, event):
+        """在某列上按右鍵:先取消編輯、選取該列,再彈出「檢視」選單。"""
+        self._cancel_edit()
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        try:
+            self.row_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.row_menu.grab_release()
+
+    def _build_split_bytes(self, start_page, end_page):
+        """把 self.doc 第 start_page~end_page 頁(1-based)組成新 PDF。回傳 bytes。"""
+        fitz = self.fitz or _import_fitz()
+        self.fitz = fitz
+        start = max(0, int(start_page) - 1)
+        end = min(len(self.doc) - 1, int(end_page) - 1)
+        new = fitz.open()
+        if end >= start:
+            new.insert_pdf(self.doc, from_page=start, to_page=end)
+        buf = io.BytesIO()
+        new.save(buf)
+        new.close()
+        return buf.getvalue()
+
+    def _view_selected_split(self, _evt=None):
+        """右鍵「檢視」:把選取列的頁面範圍組成 PDF,在「檢視」分頁預覽(不落地)。"""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        try:
+            name, start, end = str(vals[0]), int(vals[1]), int(vals[2])
+        except (ValueError, IndexError):
+            return
+        if self.doc is None:
+            messagebox.showwarning("提示", "請先選擇 PDF 檔案")
+            return
+        if start < 1 or end < start:
+            messagebox.showwarning("提示", f"「{name}」頁碼範圍不正確")
+            return
+        try:
+            data = self._build_split_bytes(start, end)
+        except Exception as e:
+            messagebox.showerror("錯誤", f"產生預覽失敗：\n{e}")
+            return
+        self._show_split_view(f"{name}（第 {start}–{end} 頁）", data)
+
+    def _show_split_view(self, title, data):
+        """在「檢視」分頁建立檢視器並載入該份切割(每次重建,銷毀舊檢視器會關檔)。"""
+        try:
+            viewer = _load_viewer_module()
+        except Exception as e:
+            messagebox.showerror("錯誤", f"無法載入檢視器：\n{e}")
+            return
+        if self._view_hint is not None:
+            self._view_hint.destroy()
+            self._view_hint = None
+        if self._view_body is not None:
+            self._view_body.destroy()
+        body = ttk.Frame(self.tab_view)
+        body.pack(fill="both", expand=True)
+        self._view_body = body
+        ttk.Label(body, text=title,
+                  font=("Microsoft JhengHei UI", 12, "bold")).pack(
+                      anchor="w", padx=8, pady=(6, 0))
+        vf = viewer.create_frame(body)         # 預設工具列:翻頁/縮放/搜尋
+        vf.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        body.after(60, lambda: vf.app.open_bytes(data, title))
+        self.notebook.select(self.tab_view)
+
     # ----------------------------------------------------------------- 規則
     def _refresh_blk_tree(self):
         for it in self.blk_tree.get_children():
@@ -1252,6 +1358,7 @@ HELP_TEXT = """PDF 切割工具 — 使用說明
   2. 選切割方式並設定條件
   3. 「開始偵測」→ 預覽結果表（名稱、起始頁、結束頁）
   4. 雙擊欄位可編輯；可新增 / 刪除規則
+     （在某列上按右鍵 →「檢視」，可在「檢視」分頁預覽該份切割的頁面）
   5. 「輸出到資料夾」直接寫出多個 PDF，或「打包成 ZIP」
 
 四種切割方式
