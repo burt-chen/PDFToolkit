@@ -46,11 +46,13 @@ GAP = 12            # 頁與頁之間的間距(像素)
 
 
 class App:
-    def __init__(self, root, presets_dir=None, show_toolbar=True):
+    def __init__(self, root, presets_dir=None, show_toolbar=True, show_open=True):
         """root 可為 tk.Tk / Toplevel / Frame(嵌入用)。presets_dir 此功能未用。
-        show_toolbar=False:不顯示自身工具列(供比對檢視由外部共用工具列驅動)。"""
+        show_toolbar=False:不顯示自身工具列(供比對檢視由外部共用工具列驅動)。
+        show_open=False:工具列保留,但不顯示「開啟」鈕(供預覽既有內容的情境)。"""
         self.root = root
         self.show_toolbar = show_toolbar
+        self.show_open = show_open
         if isinstance(root, (tk.Tk, tk.Toplevel)):
             self.root.title("PDF 檢視器")
             self.root.geometry("1040x780")
@@ -110,8 +112,10 @@ class App:
         if self.show_toolbar:
             bar.pack(fill="x", padx=6, pady=(6, 2))
 
-        ttk.Button(bar, text="開啟", command=self._open).pack(side="left")
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
+        if self.show_open:
+            ttk.Button(bar, text="開啟", command=self._open).pack(side="left")
+            ttk.Separator(bar, orient="vertical").pack(
+                side="left", fill="y", padx=6)
 
         ttk.Button(bar, text="◀ 上一頁", command=self.prev_page).pack(side="left")
         self.var_page = tk.StringVar(value="0")
@@ -741,11 +745,11 @@ class App:
         self._toggle_search()
 
 
-def create_frame(parent, presets_dir=None, show_toolbar=True):
+def create_frame(parent, presets_dir=None, show_toolbar=True, show_open=True):
     """供 PDF 工具集主程式嵌入用。回傳含檢視器 UI 的 Frame。"""
     frame = ttk.Frame(parent)
     frame.app = App(frame, presets_dir=presets_dir,   # 掛在 frame 上供外部存取
-                    show_toolbar=show_toolbar)
+                    show_toolbar=show_toolbar, show_open=show_open)
     return frame
 
 

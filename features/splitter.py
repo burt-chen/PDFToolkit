@@ -1007,7 +1007,7 @@ class App:
         ttk.Label(body, text=title,
                   font=("Microsoft JhengHei UI", 12, "bold")).pack(
                       anchor="w", padx=8, pady=(6, 0))
-        vf = viewer.create_frame(body)         # 預設工具列:翻頁/縮放/搜尋
+        vf = viewer.create_frame(body, show_open=False)  # 工具列保留,不要「開啟」鈕
         vf.pack(fill="both", expand=True, padx=6, pady=(2, 6))
         body.after(60, lambda: vf.app.open_bytes(data, title))
         self.notebook.select(self.tab_view)
