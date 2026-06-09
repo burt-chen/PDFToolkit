@@ -709,27 +709,28 @@ class App:
         self._draw_highlight()
 
     def _draw_highlight(self):
-        """畫螢光框。highlight_all=True 時所有命中淡黃標示,目前選取者再加紅框。"""
+        """畫標示框 —— 只畫外框、不填色,讓被框的文字維持清楚。
+        highlight_all=True 時所有命中用橘框,目前選取者用較粗的紅框。"""
         self.canvas.delete("search_hl")
         if not self.layout:
             return
         if self.highlight_all:
             for m in self._matches:
                 if m is not self._active_match:
-                    self._draw_hl_rect(m, "#fff0a0", "#e6b800", 1)
+                    self._draw_hl_rect(m, "#ef8a00", 1)   # 橘色外框
         if self._active_match is not None:
-            self._draw_hl_rect(self._active_match, "#ffe14d", "#d40000", 2)
+            self._draw_hl_rect(self._active_match, "#e00000", 2)  # 紅色外框
         self.canvas.tag_raise("search_hl")
 
-    def _draw_hl_rect(self, m, fill, outline, width):
+    def _draw_hl_rect(self, m, outline, width):
         lay = self.layout[m["page"]]
         x0, y0, x1, y1 = m["rect"]
         s = self.scale
+        # fill="" → 不填色,只留外框,文字完全可見
         self.canvas.create_rectangle(
             lay["x"] + x0 * s - 2, lay["y"] + y0 * s - 1,
             lay["x"] + x1 * s + 2, lay["y"] + y1 * s + 1,
-            outline=outline, width=width, fill=fill, stipple="gray50",
-            tags=("search_hl",))
+            outline=outline, width=width, fill="", tags=("search_hl",))
 
     # ----------------------------------------------- 外部驅動(比對檢視共用)
     def set_sync(self, cb):
