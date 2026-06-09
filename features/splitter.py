@@ -506,8 +506,8 @@ class App:
         self._view_body = None
         self._view_hint = ttk.Label(
             self.tab_view,
-            text="在「切割」分頁的預覽結果上按右鍵 →「檢視」，"
-                 "即可在此預覽該份切割的頁面。",
+            text="在「切割」分頁的預覽結果選取一份,再切到此「檢視」分頁,"
+                 "即可預覽該份切割的頁面。",
             foreground="#888")
         self._view_hint.pack(expand=True)
 

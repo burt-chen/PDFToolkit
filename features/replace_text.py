@@ -463,6 +463,9 @@ class App:
         # 切到「檢視」分頁時,自動顯示掃描結果目前選取的那一筆
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
+    _VIEW_HINT = ("在「取代」分頁的掃描結果選取一列,再切到此「檢視」分頁即可預覽。\n"
+                  "未掃描或未命中只顯示原始檔;命中則左右並排原始與取代後預覽。")
+
     def _build_view_tab(self):
         self.tab_view = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_view, text="檢視")
@@ -473,12 +476,23 @@ class App:
         self._mark_list = []              # 取代處座標 [{"page","rect"}]
         self._mark_total = 0
         self._mark_idx = 0
-        self._view_hint = ttk.Label(
-            self.tab_view,
-            text="在「取代」分頁的掃描結果上按右鍵 →「檢視」。\n"
-                 "未掃描或未命中只顯示原始檔；命中則左右並排原始與取代後預覽。",
-            foreground="#888", justify="left")
-        self._view_hint.pack(expand=True)
+        self._view_msg = None             # 置中訊息(初始提示 / 讀取中)
+        self._show_view_message(self._VIEW_HINT)
+
+    def _show_view_message(self, text):
+        """把「檢視」分頁內容換成一段置中訊息(初始提示 / 讀取中)。"""
+        if self._view_msg is not None:
+            self._view_msg.destroy()
+            self._view_msg = None
+        if self._view_body is not None:
+            self._view_body.destroy()
+            self._view_body = None
+            self._view_viewers = []
+            self._view_paned = None
+        self._view_msg = ttk.Label(
+            self.tab_view, text=text, foreground="#666", justify="left",
+            font=("Microsoft JhengHei UI", 13))
+        self._view_msg.pack(expand=True)
 
     def _build_main_tab(self):
         f = self.tab_main
@@ -765,27 +779,26 @@ class App:
             if warn:
                 messagebox.showwarning("提示", f"找不到檔案：\n{path}")
             return
+        # 大檔產生取代預覽/載入會耗時 → 先顯示「讀取中」並立即繪出,避免停在舊畫面
+        self._show_view_message("讀取中…請稍候")
+        self.tab_view.update_idletasks()
         try:
             orig = Path(path).read_bytes()       # 以 bytes 顯示,不鎖住原檔
-        except Exception as e:
-            if warn:
-                messagebox.showerror("錯誤", f"無法讀取檔案：\n{e}")
-            return
-        # 已掃描且命中、且有搜尋字串 → 產生取代後預覽並排;否則只看原始
-        dual = (bool(r.get("scanned")) and (r.get("hits") or 0) > 0
-                and bool(_norm(self.var_search.get()).strip()))
-        data, n = None, 0
-        if dual:
-            try:
+            # 已掃描且命中、且有搜尋字串 → 產生取代後預覽並排;否則只看原始
+            dual = (bool(r.get("scanned")) and (r.get("hits") or 0) > 0
+                    and bool(_norm(self.var_search.get()).strip()))
+            data, n = None, 0
+            if dual:
                 data, n, marks = self._build_replaced_bytes(path)
-            except Exception as e:
-                if warn:
-                    messagebox.showerror("錯誤", f"產生取代預覽失敗：\n{e}")
-                data, n, marks = None, 0, []
-            if not n:                            # 實際沒取代到 → 當未命中
-                data = None
-            else:
-                self._mark_list = marks          # 實際取代座標(供標示/導覽)
+                if not n:                        # 實際沒取代到 → 當未命中
+                    data = None
+                else:
+                    self._mark_list = marks      # 實際取代座標(供標示/導覽)
+        except Exception as e:
+            self._show_view_message(self._VIEW_HINT)   # 還原提示
+            if warn:
+                messagebox.showerror("錯誤", f"檢視失敗：\n{e}")
+            return
         self._show_view(r["name"], orig, data, n)
 
     def _show_view(self, name, orig_bytes, data, n):
@@ -796,10 +809,10 @@ class App:
         except Exception as e:
             messagebox.showerror("錯誤", f"無法載入檢視器：\n{e}")
             return
-        # 清掉舊內容(銷毀舊檢視器會觸發其關檔)
-        if self._view_hint is not None:
-            self._view_hint.destroy()
-            self._view_hint = None
+        # 清掉舊內容(訊息標籤 / 舊檢視器,銷毀舊檢視器會觸發其關檔)
+        if self._view_msg is not None:
+            self._view_msg.destroy()
+            self._view_msg = None
         if self._view_body is not None:
             self._view_body.destroy()
         body = ttk.Frame(self.tab_view)
