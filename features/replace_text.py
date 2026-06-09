@@ -965,11 +965,18 @@ class App:
         self._view_total.config(text=f"/ {len(m.doc)}")
         self._view_zoom.config(text=f"{round(m.scale * 100)}%")
 
-    def _center_view_sash(self):
+    def _center_view_sash(self, tries=0):
+        """把分隔線置中。PanedWindow 尚未配置好寬度(winfo_width()<=1)時稍後
+        重試,避免在未就緒時算出很小的值而把左面板縮到最小。"""
+        paned = self._view_paned
+        if paned is None:
+            return
+        w = paned.winfo_width()
+        if w <= 1 and tries < 40:
+            paned.after(50, lambda: self._center_view_sash(tries + 1))
+            return
         try:
-            if self._view_paned is not None:
-                self._view_paned.sashpos(
-                    0, max(200, self._view_paned.winfo_width() // 2))
+            paned.sashpos(0, max(1, w // 2))
         except Exception:
             pass
 
