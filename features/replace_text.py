@@ -167,6 +167,27 @@ def _color_to_rgb(color):
 #  core/scan + replace
 # ===========================================================================
 
+def _match_rect(bbox, ntext, nsearch, mode, direction):
+    """估算 span 內「被取代區段」的概略矩形(依字元比例,橫書取 x、直書取 y)。
+
+    比起整段 span,框得更精準;比起事後 search_for,不受字間空格/全半形影響。
+    normal:標第一個到最後一個搜尋字串的範圍;overwrite/fill:標搜尋字串到段尾。"""
+    x0, y0, x1, y1 = bbox
+    n = len(ntext) or 1
+    start = ntext.find(nsearch)
+    if start < 0:
+        return bbox
+    if mode == "normal":
+        end = ntext.rfind(nsearch) + len(nsearch)
+    else:                              # overwrite / fill_empty:標籤起到段尾
+        end = n
+    f0, f1 = start / n, min(end, n) / n
+    dx, dy = direction
+    if abs(dy) > abs(dx):              # 直書:用 y 比例
+        return (x0, y0 + f0 * (y1 - y0), x1, y0 + f1 * (y1 - y0))
+    return (x0 + f0 * (x1 - x0), y0, x0 + f1 * (x1 - x0), y1)   # 橫書:用 x 比例
+
+
 def _collect_targets(page, nsearch, nreplace=None, mode="normal"):
     """掃一頁,回傳所有命中的 span 目標(不修改頁面)。
 
@@ -195,6 +216,8 @@ def _collect_targets(page, nsearch, nreplace=None, mode="normal"):
                     continue            # 一般模式:已是先前取代結果
                 targets.append({
                     "bbox": sp["bbox"],
+                    "mrect": _match_rect(sp["bbox"], ntext, nsearch, mode,
+                                         line["dir"]),
                     "origin": sp["origin"],
                     "size": sp["size"],
                     "color": sp["color"],
@@ -288,7 +311,11 @@ def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT,
                 rotate=_rotate_for_dir(t["dir"]))
             total += 1
             if marks is not None:
-                marks.append({"page": page.number, "rect": tuple(t["bbox"])})
+                # get_text/search_for 回傳「未旋轉」座標,但檢視器渲染的是「旋轉後」
+                # 頁面 → 用 rotation_matrix 轉到顯示座標系(未旋轉頁為單位矩陣)。
+                r = (fitz.Rect(t["mrect"]) * page.rotation_matrix).normalize()
+                marks.append({"page": page.number,
+                              "rect": (r.x0, r.y0, r.x1, r.y1)})
     return total
 
 
