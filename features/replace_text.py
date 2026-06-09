@@ -284,10 +284,13 @@ FONT = ("Microsoft JhengHei UI", 12)
 
 
 class App:
-    def __init__(self, root, presets_dir=None):
+    def __init__(self, root, presets_dir=None, open_in_viewer=None):
         """root 可為 tk.Tk / Toplevel / Frame(嵌入用)。
-        presets_dir: 指定預設檔資料夾;None 時放在 app_dir()。"""
+        presets_dir: 指定預設檔資料夾;None 時放在 app_dir()。
+        open_in_viewer: 回呼 fn(path);嵌入 launcher 時用來把檔案丟到「檢視 PDF」開啟。
+                        獨立執行為 None,改用系統預設程式開檔。"""
         self.root = root
+        self.open_in_viewer = open_in_viewer
         if isinstance(root, (tk.Tk, tk.Toplevel)):
             self.root.title("PDF 文字取代")
             self.root.geometry("1040x780")
@@ -419,6 +422,8 @@ class App:
         # 預覽表
         prev = ttk.LabelFrame(f, text="3. 掃描結果")
         prev.pack(fill="both", expand=True, padx=8, pady=4)
+        ttk.Label(prev, text="提示：在檔名上按右鍵可在「檢視 PDF」開啟該檔。",
+                  foreground="#666").pack(anchor="w", padx=8, pady=(2, 0))
         cols = ("name", "hits", "status")
         self.tree = ttk.Treeview(prev, columns=cols, show="headings", height=10)
         self.tree.heading("name", text="檔名")
@@ -434,6 +439,11 @@ class App:
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         vsb.pack(side="left", fill="y", pady=4)
+        # 右鍵選單:在「檢視 PDF」開啟該檔
+        self.row_menu = tk.Menu(self.tree, tearoff=0)
+        self.row_menu.add_command(label="在「檢視 PDF」開啟",
+                                  command=self._open_selected_in_viewer)
+        self.tree.bind("<Button-3>", self._on_row_rightclick)
 
     # ----------------------------------------------------------------- 資料夾
     def _pick_folder(self):
@@ -545,11 +555,45 @@ class App:
     def _reload_tree(self):
         for it in self.tree.get_children():
             self.tree.delete(it)
-        for r in self.results:
+        # iid 設為 results 索引,雙擊時據此回查該列對應的檔案路徑
+        for i, r in enumerate(self.results):
             tag, status = self._status_text(r)
-            self.tree.insert("", "end",
+            self.tree.insert("", "end", iid=str(i),
                              values=(r["name"], r["hits"] or "", status),
                              tags=(tag,))
+
+    def _on_row_rightclick(self, event):
+        """在某列上按右鍵:先選取該列,再彈出選單。空白處則不顯示。"""
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        try:
+            self.row_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.row_menu.grab_release()
+
+    def _open_selected_in_viewer(self, _evt=None):
+        """把選取列的檔丟到內建「檢視 PDF」開啟;獨立執行則用系統預設程式。"""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        try:
+            r = self.results[int(sel[0])]
+        except (ValueError, IndexError):
+            return
+        path = r["path"]
+        if not os.path.exists(path):
+            messagebox.showwarning("提示", f"找不到檔案：\n{path}")
+            return
+        if self.open_in_viewer is not None:
+            self.open_in_viewer(path)
+        elif hasattr(os, "startfile"):       # 獨立執行(Windows):系統預設程式
+            try:
+                os.startfile(path)
+            except Exception as e:
+                messagebox.showerror("錯誤", f"無法開啟：\n{e}")
 
     # ----------------------------------------------------------------- 取代
     def _run_replace(self):
@@ -651,10 +695,10 @@ HELP_TEXT = """PDF 文字取代 — 使用說明
 """
 
 
-def create_frame(parent, presets_dir=None):
+def create_frame(parent, presets_dir=None, open_in_viewer=None):
     """供 PDF 工具集主程式嵌入用。回傳含完整取代 UI 的 Frame。"""
     frame = ttk.Frame(parent)
-    App(frame, presets_dir=presets_dir)
+    App(frame, presets_dir=presets_dir, open_in_viewer=open_in_viewer)
     return frame
 
 

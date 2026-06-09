@@ -9,6 +9,7 @@
 """
 
 import importlib
+import inspect
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -245,6 +246,15 @@ class App:
                 # 共用 presets_dir(嵌入 launcher 時由外部覆寫)
                 if self.presets_dir is not None and "presets_dir" not in kwargs:
                     kwargs["presets_dir"] = self.presets_dir
+                # 只對「接受 open_in_viewer」的功能注入回呼,讓它能把檔案
+                # 丟到「檢視 PDF」開啟(如文字取代雙擊檔名);其餘功能簽名不必改。
+                try:
+                    params = inspect.signature(factory).parameters
+                    if ("open_in_viewer" in params or
+                            any(p.kind == p.VAR_KEYWORD for p in params.values())):
+                        kwargs.setdefault("open_in_viewer", self.open_in_viewer)
+                except (TypeError, ValueError):
+                    pass
                 frame = factory(self.content, **kwargs)
                 self._feature_frames[fid] = frame
             except Exception as e:
@@ -257,6 +267,27 @@ class App:
                 return
         frame.pack(fill="both", expand=True)
         self._current_id = fid
+
+    # ------------------------------------------------ 跨功能:在檢視器開檔
+    def open_in_viewer(self, path):
+        """切換到「檢視 PDF」並開啟指定檔案。供其他功能(如文字取代雙擊檔名)呼叫。"""
+        feat = next((f for f in FEATURES if f["id"] == "viewer"), None)
+        if feat is None:
+            return
+        # 同步側邊欄選取(視覺一致),再確保功能畫面已建立並顯示
+        for iid, f in self._iid_to_feat.items():
+            if f["id"] == "viewer":
+                self.tree.selection_set(iid)
+                self.tree.focus(iid)
+                break
+        self._show_feature(feat)              # 已是目前功能時為無動作
+        frame = self._feature_frames.get(feat["id"])
+        app = getattr(frame, "app", None)
+        if app is not None:
+            try:
+                app.open_path(path)
+            except Exception:
+                pass
 
 
 def main():
