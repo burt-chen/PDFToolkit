@@ -378,6 +378,8 @@ class App:
         self.notebook.add(self.tab_help, text="說明")
         self._build_main_tab()
         self._build_help_tab()
+        # 切到「檢視」分頁時,自動顯示掃描結果目前選取的那一筆
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _build_view_tab(self):
         self.tab_view = ttk.Frame(self.notebook)
@@ -488,8 +490,8 @@ class App:
         prev = ttk.LabelFrame(f, text="3. 掃描結果")
         prev.pack(fill="both", expand=True, padx=8, pady=4)
         ttk.Label(prev,
-                  text="提示：在檔名上按右鍵 →「檢視」。未命中只顯示原始檔；"
-                       "命中則左右並排原始與取代後預覽。",
+                  text="提示：選取一列後切到上方「檢視」分頁即可預覽。未命中只顯示"
+                       "原始檔；命中則左右並排原始與取代後預覽。",
                   foreground="#666").pack(anchor="w", padx=8, pady=(2, 0))
         cols = ("name", "hits", "status")
         self.tree = ttk.Treeview(prev, columns=cols, show="headings", height=10)
@@ -506,10 +508,6 @@ class App:
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         vsb.pack(side="left", fill="y", pady=4)
-        # 右鍵選單:單一「檢視」(自動判斷只看原始或並排比對)
-        self.row_menu = tk.Menu(self.tree, tearoff=0)
-        self.row_menu.add_command(label="檢視", command=self._view_selected)
-        self.tree.bind("<Button-3>", self._on_row_rightclick)
 
     # ----------------------------------------------------------------- 資料夾
     def _pick_folder(self):
@@ -629,17 +627,14 @@ class App:
                              values=(r["name"], r["hits"] or "", status),
                              tags=(tag,))
 
-    def _on_row_rightclick(self, event):
-        """在某列上按右鍵:先選取該列,再彈出選單。空白處則不顯示。"""
-        iid = self.tree.identify_row(event.y)
-        if not iid:
+    def _on_tab_changed(self, _evt=None):
+        """切到「檢視」分頁時,顯示掃描結果目前選取的那一筆(無須右鍵)。"""
+        if not hasattr(self, "tab_view"):
             return
-        self.tree.selection_set(iid)
-        self.tree.focus(iid)
-        try:
-            self.row_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.row_menu.grab_release()
+        if str(self.notebook.select()) != str(self.tab_view):
+            return
+        if hasattr(self, "tree") and self.tree.selection():
+            self._view_selected(warn=False)
 
     def _selected_result(self):
         """回傳右鍵/選取列對應的 result dict;沒有則 None。"""
@@ -672,19 +667,22 @@ class App:
             doc.close()
 
     # ----------------------------------------------------------------- 檢視
-    def _view_selected(self, _evt=None):
-        """右鍵「檢視」:自動判斷 — 未掃描/未命中只顯示原始;命中則原始+取代後並排。"""
+    def _view_selected(self, _evt=None, warn=True):
+        """顯示選取列 — 自動判斷:未掃描/未命中只顯示原始;命中則原始+取代後並排。
+        由分頁切換觸發時 warn=False,條件不符就靜默略過(不彈訊息)。"""
         r = self._selected_result()
         if r is None:
             return
         path = r["path"]
         if not os.path.exists(path):
-            messagebox.showwarning("提示", f"找不到檔案：\n{path}")
+            if warn:
+                messagebox.showwarning("提示", f"找不到檔案：\n{path}")
             return
         try:
             orig = Path(path).read_bytes()       # 以 bytes 顯示,不鎖住原檔
         except Exception as e:
-            messagebox.showerror("錯誤", f"無法讀取檔案：\n{e}")
+            if warn:
+                messagebox.showerror("錯誤", f"無法讀取檔案：\n{e}")
             return
         # 已掃描且命中、且有搜尋字串 → 產生取代後預覽並排;否則只看原始
         dual = (bool(r.get("scanned")) and (r.get("hits") or 0) > 0
@@ -694,7 +692,8 @@ class App:
             try:
                 data, n = self._build_replaced_bytes(path)
             except Exception as e:
-                messagebox.showerror("錯誤", f"產生取代預覽失敗：\n{e}")
+                if warn:
+                    messagebox.showerror("錯誤", f"產生取代預覽失敗：\n{e}")
                 data, n = None, 0
             if not n:                            # 實際沒取代到 → 當未命中
                 data = None
@@ -919,7 +918,7 @@ HELP_TEXT = """PDF 文字取代 — 使用說明
      要保留原檔就另選「輸出資料夾」，留空則覆蓋原檔
   2. 填「搜尋文字」與「取代為」，視需要選重寫字型
   3. 「掃描預覽」→ 看每個檔案命中幾處、狀態
-     （在結果列上按右鍵 →「檢視」：未命中只顯示原始檔；命中則在「檢視」分頁
+     （選取一列後切到上方「檢視」分頁即可預覽：未命中只顯示原始檔；命中則
        左右並排原始與取代後預覽，捲動同步、共用一個工具列）
   4. 「執行取代」→ 輸出到上方指定的資料夾
 
