@@ -374,21 +374,23 @@ class App:
         self.tab_main = ttk.Frame(self.notebook)
         self.tab_help = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_main, text="取代")
-        self._build_compare_tab()                 # 「比對」分頁(取代與說明之間)
+        self._build_view_tab()                    # 「檢視」分頁(取代與說明之間)
         self.notebook.add(self.tab_help, text="說明")
         self._build_main_tab()
         self._build_help_tab()
 
-    def _build_compare_tab(self):
-        self.tab_compare = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_compare, text="比對")
-        self._cmp_built = False
-        self._cmp_hint = ttk.Label(
-            self.tab_compare,
-            text="在「取代」分頁的掃描結果上按右鍵 →「並排比對：原始 vs 取代後」，"
-                 "比對結果會顯示在這裡。",
-            foreground="#888")
-        self._cmp_hint.pack(expand=True)
+    def _build_view_tab(self):
+        self.tab_view = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_view, text="檢視")
+        self._view_body = None
+        self._view_viewers = []
+        self._view_paned = None
+        self._view_hint = ttk.Label(
+            self.tab_view,
+            text="在「取代」分頁的掃描結果上按右鍵 →「檢視」。\n"
+                 "未掃描或未命中只顯示原始檔；命中則左右並排原始與取代後預覽。",
+            foreground="#888", justify="left")
+        self._view_hint.pack(expand=True)
 
     def _build_main_tab(self):
         f = self.tab_main
@@ -491,8 +493,8 @@ class App:
         prev = ttk.LabelFrame(f, text="3. 掃描結果")
         prev.pack(fill="both", expand=True, padx=8, pady=4)
         ttk.Label(prev,
-                  text="提示：在檔名上按右鍵可檢視原始檔、預覽取代後結果，"
-                       "或並排比對前後差異。",
+                  text="提示：在檔名上按右鍵 →「檢視」。未命中只顯示原始檔；"
+                       "命中則左右並排原始與取代後預覽。",
                   foreground="#666").pack(anchor="w", padx=8, pady=(2, 0))
         cols = ("name", "hits", "status")
         self.tree = ttk.Treeview(prev, columns=cols, show="headings", height=10)
@@ -509,14 +511,9 @@ class App:
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         vsb.pack(side="left", fill="y", pady=4)
-        # 右鍵選單:檢視原始檔 / 預覽取代後 / 並排比對
+        # 右鍵選單:單一「檢視」(自動判斷只看原始或並排比對)
         self.row_menu = tk.Menu(self.tree, tearoff=0)
-        self.row_menu.add_command(label="檢視原始檔案",
-                                  command=self._open_selected_in_viewer)
-        self.row_menu.add_command(label="預覽取代後結果",
-                                  command=self._preview_selected_replaced)
-        self.row_menu.add_command(label="並排比對：原始 vs 取代後",
-                                  command=self._compare_selected)
+        self.row_menu.add_command(label="檢視", command=self._view_selected)
         self.tree.bind("<Button-3>", self._on_row_rightclick)
 
     # ----------------------------------------------------------------- 資料夾
@@ -659,23 +656,6 @@ class App:
         except (ValueError, IndexError):
             return None
 
-    def _open_selected_in_viewer(self, _evt=None):
-        """把選取列的原始檔丟到內建「檢視 PDF」開啟;獨立執行則用系統預設程式。"""
-        r = self._selected_result()
-        if r is None:
-            return
-        path = r["path"]
-        if not os.path.exists(path):
-            messagebox.showwarning("提示", f"找不到檔案：\n{path}")
-            return
-        if self.open_in_viewer is not None:
-            self.open_in_viewer(path)
-        elif hasattr(os, "startfile"):       # 獨立執行(Windows):系統預設程式
-            try:
-                os.startfile(path)
-            except Exception as e:
-                messagebox.showerror("錯誤", f"無法開啟：\n{e}")
-
     def _build_replaced_bytes(self, path):
         """以目前設定在記憶體產生取代後的 PDF。回傳 (bytes, 取代處數)。"""
         fitz = self.fitz or _import_fitz()
@@ -696,104 +676,160 @@ class App:
         finally:
             doc.close()
 
-    def _prepare_replaced(self):
-        """共用:取選取列、檢查搜尋字串/檔案,並產生取代後 bytes。
-        回傳 (r, data, n);任何條件不符則跳訊息並回傳 None。"""
+    # ----------------------------------------------------------------- 檢視
+    def _view_selected(self, _evt=None):
+        """右鍵「檢視」:自動判斷 — 未掃描/未命中只顯示原始;命中則原始+取代後並排。"""
         r = self._selected_result()
         if r is None:
-            return None
-        if not _norm(self.var_search.get()).strip():
-            messagebox.showwarning("提示", "請先輸入搜尋文字")
-            return None
-        if not os.path.exists(r["path"]):
-            messagebox.showwarning("提示", f"找不到檔案：\n{r['path']}")
-            return None
-        try:
-            data, n = self._build_replaced_bytes(r["path"])
-        except Exception as e:
-            messagebox.showerror("錯誤", f"產生預覽失敗：\n{e}")
-            return None
-        return r, data, n
-
-    def _preview_selected_replaced(self, _evt=None):
-        """右鍵「預覽取代後結果」:在記憶體跑取代,丟到檢視器顯示(不寫檔)。"""
-        prep = self._prepare_replaced()
-        if prep is None:
             return
-        r, data, n = prep
-        name = (f"{r['name']}（取代後預覽，{n} 處）" if n
-                else f"{r['name']}（未命中，與原檔相同）")
-        if self.open_bytes_in_viewer is not None:
-            self.open_bytes_in_viewer(data, name)
-        elif hasattr(os, "startfile"):     # 獨立執行:寫暫存檔再用系統程式開
-            import tempfile
-            tmp = os.path.join(tempfile.gettempdir(), f"_preview_{r['name']}")
+        path = r["path"]
+        if not os.path.exists(path):
+            messagebox.showwarning("提示", f"找不到檔案：\n{path}")
+            return
+        try:
+            orig = Path(path).read_bytes()       # 以 bytes 顯示,不鎖住原檔
+        except Exception as e:
+            messagebox.showerror("錯誤", f"無法讀取檔案：\n{e}")
+            return
+        # 已掃描且命中、且有搜尋字串 → 產生取代後預覽並排;否則只看原始
+        dual = (bool(r.get("scanned")) and (r.get("hits") or 0) > 0
+                and bool(_norm(self.var_search.get()).strip()))
+        data, n = None, 0
+        if dual:
             try:
-                Path(tmp).write_bytes(data)
-                os.startfile(tmp)
+                data, n = self._build_replaced_bytes(path)
             except Exception as e:
-                messagebox.showerror("錯誤", f"無法開啟預覽:\n{e}")
+                messagebox.showerror("錯誤", f"產生取代預覽失敗：\n{e}")
+                data, n = None, 0
+            if not n:                            # 實際沒取代到 → 當未命中
+                data = None
+        self._show_view(r["name"], orig, data, n)
 
-    def _compare_selected(self, _evt=None):
-        """右鍵「並排比對」:在「比對」分頁左右並排顯示原始與取代後。"""
-        prep = self._prepare_replaced()
-        if prep is None:
-            return
-        r, data, n = prep
-        try:
-            orig = Path(r["path"]).read_bytes()    # 以 bytes 顯示,不鎖住原檔
-        except Exception as e:
-            messagebox.showerror("錯誤", f"無法讀取原始檔：\n{e}")
-            return
-        self._show_compare_in_tab(r["name"], orig, data, n)
-
-    def _show_compare_in_tab(self, name, orig_bytes, data, n):
-        """在「比對」分頁建立(或重用)兩個並排檢視器並載入內容,然後切到該分頁。"""
+    def _show_view(self, name, orig_bytes, data, n):
+        """在「檢視」分頁顯示。data=None → 只顯示原始;否則左原始/右取代後並排。
+        共用單一工具列驅動所有面板;有兩面板時捲動同步。"""
         try:
             viewer = _load_viewer_module()
         except Exception as e:
             messagebox.showerror("錯誤", f"無法載入檢視器：\n{e}")
             return
         bold = ("Microsoft JhengHei UI", 12, "bold")
-        if not self._cmp_built:
-            self._cmp_hint.destroy()
-            bar = ttk.Frame(self.tab_compare)
-            bar.pack(fill="x", padx=6, pady=(6, 0))
-            self._cmp_title = ttk.Label(bar, text="", font=bold)
-            self._cmp_title.pack(side="left")
-            paned = ttk.PanedWindow(self.tab_compare, orient="horizontal")
-            paned.pack(fill="both", expand=True, padx=6, pady=6)
+        # 清掉舊內容(銷毀舊檢視器會觸發其關檔)
+        if self._view_hint is not None:
+            self._view_hint.destroy()
+            self._view_hint = None
+        if self._view_body is not None:
+            self._view_body.destroy()
+        body = ttk.Frame(self.tab_view)
+        body.pack(fill="both", expand=True)
+        self._view_body = body
+        self._view_paned = None
+
+        self._build_view_toolbar(body)
+
+        area = ttk.Frame(body)
+        area.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        if data is None:
+            v = viewer.create_frame(area, show_toolbar=False)
+            v.pack(fill="both", expand=True)
+            self._view_viewers = [v.app]
+            body.after(60, lambda: v.app.open_bytes(orig_bytes, name))
+        else:
+            paned = ttk.PanedWindow(area, orient="horizontal")
+            paned.pack(fill="both", expand=True)
+            self._view_paned = paned
             left = ttk.Frame(paned)
             paned.add(left, weight=1)
             ttk.Label(left, text="原始檔案", font=bold).pack(
-                anchor="w", padx=6, pady=(4, 0))
-            self._cmp_lv = viewer.create_frame(left)
-            self._cmp_lv.pack(fill="both", expand=True)
+                anchor="w", padx=6, pady=(2, 0))
+            lv = viewer.create_frame(left, show_toolbar=False)
+            lv.pack(fill="both", expand=True)
             right = ttk.Frame(paned)
             paned.add(right, weight=1)
-            self._cmp_rlabel = ttk.Label(right, text="", font=bold,
-                                         foreground="#067")
-            self._cmp_rlabel.pack(anchor="w", padx=6, pady=(4, 0))
-            self._cmp_rv = viewer.create_frame(right)
-            self._cmp_rv.pack(fill="both", expand=True)
-            self._cmp_paned = paned
-            self._cmp_built = True
-            self.tab_compare.after(150, self._center_cmp_sash)
+            ttk.Label(right, text=f"取代後預覽（{n} 處）", font=bold,
+                      foreground="#067").pack(anchor="w", padx=6, pady=(2, 0))
+            rv = viewer.create_frame(right, show_toolbar=False)
+            rv.pack(fill="both", expand=True)
+            self._view_viewers = [lv.app, rv.app]
+            lv.app.set_sync(rv.app.sync_to)      # 捲動同步(兩邊互相帶動)
+            rv.app.set_sync(lv.app.sync_to)
+            body.after(60, lambda: lv.app.open_bytes(orig_bytes, name))
+            body.after(60, lambda: rv.app.open_bytes(data, name))
+            body.after(160, self._center_view_sash)
+        # 工具列顯示由第一個(主)檢視器回報頁碼/縮放
+        self._view_viewers[0].on_state = self._refresh_view_toolbar
+        self.notebook.select(self.tab_view)
 
-        self._cmp_title.config(text=f"比對：{name}")
-        self._cmp_rlabel.config(
-            text=(f"取代後預覽（{n} 處）" if n
-                  else "取代後預覽（未命中，與原檔相同）"))
-        # 延遲載入:等分頁布局好,檢視器才算得出「適合頁面」的縮放
-        self.tab_compare.after(
-            60, lambda: self._cmp_lv.app.open_bytes(orig_bytes, f"{name}（原始）"))
-        self.tab_compare.after(
-            60, lambda: self._cmp_rv.app.open_bytes(data, f"{name}（取代後）"))
-        self.notebook.select(self.tab_compare)
+    def _build_view_toolbar(self, parent):
+        """單一共用工具列,操作會套用到所有面板(原始 + 取代後)。無「開啟」鈕。"""
+        bar = ttk.Frame(parent)
+        bar.pack(fill="x", padx=6, pady=(6, 0))
+        ttk.Button(bar, text="◀ 上一頁",
+                   command=lambda: self._view_each("prev_page")).pack(side="left")
+        self._view_page = tk.StringVar(value="1")
+        ent = ttk.Entry(bar, textvariable=self._view_page, width=5,
+                        justify="center")
+        ent.pack(side="left", padx=(6, 2))
+        ent.bind("<Return>", self._view_goto_page)
+        self._view_total = ttk.Label(bar, text="/ 0")
+        self._view_total.pack(side="left", padx=(0, 6))
+        ttk.Button(bar, text="下一頁 ▶",
+                   command=lambda: self._view_each("next_page")).pack(side="left")
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(bar, text="－", width=3,
+                   command=lambda: self._view_each("zoom_out")).pack(side="left")
+        self._view_zoom = ttk.Label(bar, text="100%", width=6, anchor="center")
+        self._view_zoom.pack(side="left", padx=2)
+        ttk.Button(bar, text="＋", width=3,
+                   command=lambda: self._view_each("zoom_in")).pack(side="left")
+        ttk.Button(bar, text="適合寬度",
+                   command=lambda: self._view_each("fit_width")).pack(
+                       side="left", padx=(6, 2))
+        ttk.Button(bar, text="適合頁面",
+                   command=lambda: self._view_each("fit_page")).pack(side="left")
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
+        self._view_search = tk.StringVar()
+        sent = ttk.Entry(bar, textvariable=self._view_search, width=20)
+        sent.pack(side="left")
+        sent.bind("<Return>", self._view_do_search)
+        ttk.Button(bar, text="搜尋", command=self._view_do_search).pack(
+            side="left", padx=(4, 0))
 
-    def _center_cmp_sash(self):
+    def _view_each(self, method):
+        for v in self._view_viewers:
+            try:
+                getattr(v, method)()
+            except Exception:
+                pass
+
+    def _view_goto_page(self, _evt=None):
         try:
-            self._cmp_paned.sashpos(0, max(200, self._cmp_paned.winfo_width() // 2))
+            idx = int(self._view_page.get()) - 1
+        except ValueError:
+            return
+        for v in self._view_viewers:
+            v.show_page(idx)
+
+    def _view_do_search(self, _evt=None):
+        text = self._view_search.get()
+        for v in self._view_viewers:
+            v.search(text)
+
+    def _refresh_view_toolbar(self):
+        if not self._view_viewers:
+            return
+        m = self._view_viewers[0]
+        if m.doc is None:
+            return
+        self._view_page.set(str(m.page_index + 1))
+        self._view_total.config(text=f"/ {len(m.doc)}")
+        self._view_zoom.config(text=f"{round(m.scale * 100)}%")
+
+    def _center_view_sash(self):
+        try:
+            if self._view_paned is not None:
+                self._view_paned.sashpos(
+                    0, max(200, self._view_paned.winfo_width() // 2))
         except Exception:
             pass
 
@@ -874,7 +910,8 @@ HELP_TEXT = """PDF 文字取代 — 使用說明
      要保留原檔就另選「輸出資料夾」，留空則覆蓋原檔
   2. 填「搜尋文字」與「取代為」，視需要選重寫字型
   3. 「掃描預覽」→ 看每個檔案命中幾處、狀態
-     （在結果列上按右鍵可：檢視原始檔、預覽取代後結果、或左右並排比對前後差異）
+     （在結果列上按右鍵 →「檢視」：未命中只顯示原始檔；命中則在「檢視」分頁
+       左右並排原始與取代後預覽，捲動同步、共用一個工具列）
   4. 「執行取代」→ 輸出到上方指定的資料夾
 
 說明

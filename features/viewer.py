@@ -46,9 +46,11 @@ GAP = 12            # 頁與頁之間的間距(像素)
 
 
 class App:
-    def __init__(self, root, presets_dir=None):
-        """root 可為 tk.Tk / Toplevel / Frame(嵌入用)。presets_dir 此功能未用。"""
+    def __init__(self, root, presets_dir=None, show_toolbar=True):
+        """root 可為 tk.Tk / Toplevel / Frame(嵌入用)。presets_dir 此功能未用。
+        show_toolbar=False:不顯示自身工具列(供比對檢視由外部共用工具列驅動)。"""
         self.root = root
+        self.show_toolbar = show_toolbar
         if isinstance(root, (tk.Tk, tk.Toplevel)):
             self.root.title("PDF 檢視器")
             self.root.geometry("1040x780")
@@ -79,6 +81,11 @@ class App:
         self._matches = []               # [{page, rect(x0,y0,x1,y1), snippet}]
         self._active_match = None        # 目前標示的那一筆
 
+        # 外部驅動(供比對檢視:共用工具列 + 同步捲動)
+        self._sync_cb = None             # 本檢視器捲動時回呼 fn(fraction)
+        self._sync_lock = False          # 被動捲動中,避免回呼造成兩邊互推
+        self.on_state = None             # 頁碼/縮放變動時回呼(更新外部工具列)
+
         # 嵌入時不動全域 ttk 樣式/字型(同 splitter.py 處理)
         if isinstance(root, (tk.Tk, tk.Toplevel)):
             self._setup_style()
@@ -96,8 +103,11 @@ class App:
 
     # ---- UI ----
     def _build_ui(self):
+        # show_toolbar=False:仍建立工具列元件(var_page/lbl_zoom 等供內部沿用),
+        # 只是不 pack 出來;改由外部共用工具列驅動。
         bar = ttk.Frame(self.root)
-        bar.pack(fill="x", padx=6, pady=(6, 2))
+        if self.show_toolbar:
+            bar.pack(fill="x", padx=6, pady=(6, 2))
 
         ttk.Button(bar, text="開啟", command=self._open).pack(side="left")
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
@@ -173,7 +183,8 @@ class App:
 
         self.lbl_status = ttk.Label(self.root, text="", foreground="#555",
                                     anchor="w")
-        self.lbl_status.pack(fill="x", padx=8, pady=(0, 4))
+        if self.show_toolbar:
+            self.lbl_status.pack(fill="x", padx=8, pady=(0, 4))
 
         # 元件被銷毀(切換功能/關閉)時關閉文件,釋放檔案鎖定
         self.canvas.bind("<Destroy>", self._on_destroy)
@@ -403,6 +414,7 @@ class App:
             self._scroll_to_page(self.page_index)
         self._render_visible()
         self._draw_highlight()
+        self._notify_state()
 
     # ----------------------------------------------------------------- 渲染
     def _ensure_rendered(self, i):
@@ -461,6 +473,12 @@ class App:
     # ----------------------------------------------------------------- 事件
     def _on_yscroll(self, first, last):
         self.vsb.set(first, last)
+        # 主動捲動 → 通知同步對象(被動捲動時 _sync_lock 為真,不回呼以免互推)
+        if self._sync_cb is not None and not self._sync_lock:
+            try:
+                self._sync_cb(float(first))
+            except Exception:
+                pass
         # 捲動頻繁 → debounce 後再做延遲渲染與頁碼更新
         if self._vis_job is not None:
             self.canvas.after_cancel(self._vis_job)
@@ -470,6 +488,7 @@ class App:
         self._vis_job = None
         self._render_visible()
         self._update_current_page()
+        self._notify_state()
 
     def _on_canvas_resize(self, _evt=None):
         size = (self.canvas.winfo_width(), self.canvas.winfo_height())
@@ -671,11 +690,45 @@ class App:
             tags=("search_hl",))
         self.canvas.tag_raise("search_hl")
 
+    # ----------------------------------------------- 外部驅動(比對檢視共用)
+    def set_sync(self, cb):
+        """設定捲動同步回呼:本檢視器主動捲動時呼叫 cb(fraction)。"""
+        self._sync_cb = cb
 
-def create_frame(parent, presets_dir=None):
+    def sync_to(self, fraction):
+        """被動捲到指定比例(_sync_lock 期間不回呼,避免兩邊互推成迴圈)。"""
+        self._sync_lock = True
+        try:
+            self.canvas.yview_moveto(fraction)
+        finally:
+            self._sync_lock = False
+        self._render_visible()
+        self._draw_highlight()
+
+    def _notify_state(self):
+        if self.on_state is not None:
+            try:
+                self.on_state()
+            except Exception:
+                pass
+
+    def search(self, text):
+        """以指定文字搜尋並跳到第一筆(供外部共用工具列驅動)。空字串則清除。"""
+        self.var_search.set(text or "")
+        self._do_search()
+        if self._matches:
+            try:
+                self.tv.selection_set("0")    # 觸發跳頁與螢光標示
+                self.tv.focus("0")
+            except Exception:
+                pass
+
+
+def create_frame(parent, presets_dir=None, show_toolbar=True):
     """供 PDF 工具集主程式嵌入用。回傳含檢視器 UI 的 Frame。"""
     frame = ttk.Frame(parent)
-    frame.app = App(frame, presets_dir=presets_dir)   # 掛在 frame 上供外部存取
+    frame.app = App(frame, presets_dir=presets_dir,   # 掛在 frame 上供外部存取
+                    show_toolbar=show_toolbar)
     return frame
 
 
