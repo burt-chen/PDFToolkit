@@ -275,19 +275,57 @@ def _unique_fontname(stem, used):
     return nm
 
 
+def _make_mark(fitz, page, t, new_text, replace, nsearch, mode, ff,
+               rotate, glyph_fonts):
+    """產生一處取代的標示座標 {page, orig, new}。
+    orig:原始檔(左)被取代字的座標(原始字元 bbox)。
+    new :取代後(右)新字的座標 —— 因 NFKC 把全形→半形等會讓整行重排,
+         必須用實際寫入的字型量測新文字位置,不能沿用原始座標。
+    皆經 rotation_matrix 轉到檢視器的顯示座標系。橫書才量測 new,其餘退回 orig。"""
+    rotm = page.rotation_matrix
+    o = (fitz.Rect(t.get("mrect") or t["bbox"]) * rotm).normalize()
+    orig = (o.x0, o.y0, o.x1, o.y1)
+    new = orig
+    if rotate == 0:
+        try:
+            fnt = glyph_fonts.get(ff)
+            if fnt is None:
+                fnt = fitz.Font(fontfile=ff) if ff else fitz.Font("helv")
+                glyph_fonts[ff] = fnt
+            size = t["size"]
+            if mode == "normal":
+                j0 = new_text.find(replace)
+                j1 = new_text.rfind(replace) + len(replace)
+            else:                          # overwrite/fill:標籤起到段尾
+                j0, j1 = t["ntext"].find(nsearch), len(new_text)
+            if j0 < 0:
+                j0, j1 = 0, len(new_text)
+            ox, oy = t["origin"]
+            xpre = fnt.text_length(new_text[:j0], fontsize=size)
+            xw = fnt.text_length(new_text[j0:j1], fontsize=size)
+            nr = (fitz.Rect(ox + xpre, oy - fnt.ascender * size,
+                            ox + xpre + xw, oy - fnt.descender * size)
+                  * rotm).normalize()
+            new = (nr.x0, nr.y0, nr.x1, nr.y1)
+        except Exception:
+            new = orig
+    return {"page": page.number, "orig": orig, "new": new}
+
+
 def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT,
                    mode="normal", marks=None):
     """就地在已開啟的 doc 取代文字。回傳實際取代的 span 數。
 
     mode("overwrite"/"fill_empty"):把命中 span 內「搜尋字串到該段結尾」整段
     換成取代字串(fill_empty 只在原本沒有舊值時才動),避免新值疊加在舊值前面。
-    marks:傳入 list 時,每取代一處就 append {"page", "rect"}(原始 span 座標),
-    供檢視標示「取代處」用 —— 比事後搜尋可靠(不受字間空格/全半形影響)。"""
+    marks:傳入 list 時,每取代一處就 append {"page", "orig", "new"}(左原始 /
+    右取代後的座標)供檢視標示「取代處」用 —— 比事後搜尋可靠(不受空格/全半形)。"""
     nsearch = _norm(search)
     if not nsearch:
         return 0
     nreplace = _norm(replace)
     total = 0
+    glyph_fonts = {}                  # 字型檔 → fitz.Font(量測新文字位置用)
     for page in doc:
         targets = _collect_targets(page, nsearch, nreplace, mode,
                                    with_rect=(marks is not None))
@@ -318,20 +356,17 @@ def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT,
                     name_cache[ff] = nm
             else:
                 nm = "helv"
+            rotate = _rotate_for_dir(t["dir"])
             page.insert_text(
                 t["origin"], new_text,
                 fontname=nm,
                 fontsize=t["size"],
                 color=_color_to_rgb(t["color"]),
-                rotate=_rotate_for_dir(t["dir"]))
+                rotate=rotate)
             total += 1
             if marks is not None:
-                # get_text 回傳「未旋轉」座標,但檢視器渲染的是「旋轉後」頁面 →
-                # 用 rotation_matrix 轉到顯示座標系(未旋轉頁為單位矩陣)。
-                mr = t.get("mrect") or t["bbox"]
-                r = (fitz.Rect(mr) * page.rotation_matrix).normalize()
-                marks.append({"page": page.number,
-                              "rect": (r.x0, r.y0, r.x1, r.y1)})
+                marks.append(_make_mark(fitz, page, t, new_text, replace,
+                                        nsearch, mode, ff, rotate, glyph_fonts))
     return total
 
 
@@ -865,8 +900,10 @@ class App:
         marks = self._mark_list
         if rv.doc is None or not marks:
             return
-        self._mark_total = rv.set_marks(marks)   # 右:全部取代處標示
-        lv.set_marks(marks)                      # 左:同位置標示(原始欄位)
+        # 左用原始座標、右用取代後座標(NFKC 重排後位置不同,須各用各的)
+        lv.set_marks([{"page": m["page"], "rect": m["orig"]} for m in marks])
+        self._mark_total = rv.set_marks(
+            [{"page": m["page"], "rect": m["new"]} for m in marks])
         self._mark_idx = 0
         if self._mark_total > 0:
             rv.goto_match_index(0)               # 右捲到第一處(左同步頁)
