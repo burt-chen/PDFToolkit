@@ -757,38 +757,27 @@ class App:
         """切換搜尋結果面板顯示/隱藏(供外部:各面板標題旁的搜尋鈕)。"""
         self._toggle_search()
 
-    def run_search(self, text):
-        """以指定文字搜尋並跳到第一筆(供外部標示取代處)。回傳命中數。"""
-        self.var_search.set(text or "")
-        self._do_search()
-        if self._matches:
-            self._goto_match(self._matches[0], center=False)
-        else:
-            self._draw_highlight()
+    def set_marks(self, marks):
+        """直接指定要標示的位置清單(取代既有搜尋結果)。marks:[{'page','rect'}]。
+        啟用「全部淡黃標示」。回傳數量。"""
+        self._matches = [{"page": m["page"], "rect": tuple(m["rect"]),
+                          "snippet": ""} for m in marks]
+        self._active_match = None
+        self.highlight_all = True
+        self._render_visible()
+        self._draw_highlight()
         return len(self._matches)
 
     def goto_match_index(self, i):
-        """跳到第 i 筆命中(供外部取代處導覽,對齊頁頂與另一邊一致)。"""
+        """跳到第 i 筆並對齊頁頂(供取代處導覽,與另一邊一致)。"""
         if 0 <= i < len(self._matches):
             self._goto_match(self._matches[i], center=False)
 
-    def mark_search(self, text):
-        """搜尋並標示全部命中(不跳轉、不設作用中)。供對照面板標示。回傳命中數。"""
-        self.var_search.set(text or "")
-        self._do_search()
-        self._active_match = None
-        self._draw_highlight()
-        return len(self._matches)
-
-    def highlight_page(self, page):
-        """把指定頁的第一個命中設為作用中並重畫(供對照面板強調同頁欄位)。"""
-        self._active_match = next(
-            (m for m in self._matches if m["page"] == page), None)
-        self._draw_highlight()
-
-    def active_page(self):
-        """目前作用中命中的頁碼(0-based);無則 None。"""
-        return self._active_match["page"] if self._active_match else None
+    def highlight_index(self, i):
+        """把第 i 筆設為作用中並重畫(不捲動,供對照面板強調同一處)。"""
+        if 0 <= i < len(self._matches):
+            self._active_match = self._matches[i]
+            self._draw_highlight()
 
 
 def create_frame(parent, presets_dir=None, show_toolbar=True, show_open=True):

@@ -239,11 +239,13 @@ def _unique_fontname(stem, used):
 
 
 def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT,
-                   mode="normal"):
+                   mode="normal", marks=None):
     """就地在已開啟的 doc 取代文字。回傳實際取代的 span 數。
 
     mode("overwrite"/"fill_empty"):把命中 span 內「搜尋字串到該段結尾」整段
-    換成取代字串(fill_empty 只在原本沒有舊值時才動),避免新值疊加在舊值前面。"""
+    換成取代字串(fill_empty 只在原本沒有舊值時才動),避免新值疊加在舊值前面。
+    marks:傳入 list 時,每取代一處就 append {"page", "rect"}(原始 span 座標),
+    供檢視標示「取代處」用 —— 比事後搜尋可靠(不受字間空格/全半形影響)。"""
     nsearch = _norm(search)
     if not nsearch:
         return 0
@@ -285,6 +287,8 @@ def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT,
                 color=_color_to_rgb(t["color"]),
                 rotate=_rotate_for_dir(t["dir"]))
             total += 1
+            if marks is not None:
+                marks.append({"page": page.number, "rect": tuple(t["bbox"])})
     return total
 
 
@@ -388,7 +392,7 @@ class App:
         self._view_viewers = []
         self._view_paned = None
         self._view_sync_lock = False      # 同步時的防迴圈鎖(兩邊互推保護)
-        self._mark_text = ""              # 取代處導覽:用來定位的取代內容
+        self._mark_list = []              # 取代處座標 [{"page","rect"}]
         self._mark_total = 0
         self._mark_idx = 0
         self._view_hint = ttk.Label(
@@ -650,14 +654,16 @@ class App:
             return None
 
     def _build_replaced_bytes(self, path):
-        """以目前設定在記憶體產生取代後的 PDF。回傳 (bytes, 取代處數)。"""
+        """以目前設定在記憶體產生取代後的 PDF。回傳 (bytes, 取代處數, marks)。
+        marks: [{"page", "rect"}] 每處實際取代的座標(供檢視標示取代處)。"""
         fitz = self.fitz or _import_fitz()
         self.fitz = fitz
         doc = fitz.open(stream=Path(path).read_bytes(), filetype="pdf")
+        marks = []
         try:
             n = replace_in_doc(
                 fitz, doc, self.var_search.get(), self.var_replace.get(),
-                self.var_font.get(), self.var_field_mode.get())
+                self.var_font.get(), self.var_field_mode.get(), marks=marks)
             if n:
                 try:
                     doc.subset_fonts()
@@ -665,7 +671,7 @@ class App:
                     pass
             buf = io.BytesIO()
             doc.save(buf, garbage=4, deflate=True)
-            return buf.getvalue(), n
+            return buf.getvalue(), n, marks
         finally:
             doc.close()
 
@@ -693,15 +699,15 @@ class App:
         data, n = None, 0
         if dual:
             try:
-                data, n = self._build_replaced_bytes(path)
+                data, n, marks = self._build_replaced_bytes(path)
             except Exception as e:
                 if warn:
                     messagebox.showerror("錯誤", f"產生取代預覽失敗：\n{e}")
-                data, n = None, 0
+                data, n, marks = None, 0, []
             if not n:                            # 實際沒取代到 → 當未命中
                 data = None
             else:
-                self._mark_text = self.var_replace.get()   # 取代處導覽定位用
+                self._mark_list = marks          # 實際取代座標(供標示/導覽)
         self._show_view(r["name"], orig, data, n)
 
     def _show_view(self, name, orig_bytes, data, n):
@@ -808,24 +814,20 @@ class App:
                                          command=lambda: self._goto_mark(1))
 
     def _init_marks(self):
-        """雙面板:右面板標示所有取代處(以『取代內容』定位)、左面板標示對應的
-        原始欄位(以『搜尋字串』=標籤定位),並啟用工具列「取代處」導覽。"""
+        """雙面板:用實際取代座標標示取代處 —— 左右同一組座標,完全對齊,
+        且不受字間空格/全半形影響。並啟用工具列「取代處」導覽。"""
         if len(self._view_viewers) != 2:
             return
         lv, rv = self._view_viewers
-        text = (self._mark_text or "").strip()
-        if rv.doc is None or not text:
+        marks = self._mark_list
+        if rv.doc is None or not marks:
             return
-        rv.highlight_all = True                  # 右:全部取代處淡黃標示
-        self._mark_total = rv.run_search(text)   # 跳到第一處(右捲動,左同步頁)
+        self._mark_total = rv.set_marks(marks)   # 右:全部取代處標示
+        lv.set_marks(marks)                      # 左:同位置標示(原始欄位)
         self._mark_idx = 0
-        # 左:原始檔對應欄位以搜尋字串(標籤)定位並全部標示(不跳轉)
-        label = self.var_search.get()
-        if lv.doc is not None and _norm(label).strip():
-            lv.highlight_all = True
-            lv.mark_search(label)
         if self._mark_total > 0:
-            lv.highlight_page(rv.active_page())  # 左側強調目前取代處同頁的欄位
+            rv.goto_match_index(0)               # 右捲到第一處(左同步頁)
+            lv.highlight_index(0)                # 左強調同一處
             self._mark_sep.pack(side="left", fill="y", padx=6,
                                 before=self._mark_anchor)
             self._mark_prev_btn.pack(side="left", before=self._mark_anchor)
@@ -839,9 +841,7 @@ class App:
         lv, rv = self._view_viewers
         self._mark_idx = max(0, min(self._mark_total - 1, self._mark_idx + d))
         rv.goto_match_index(self._mark_idx)      # 右:跳到該取代處(左同步頁)
-        page = rv.active_page()
-        if page is not None:
-            lv.highlight_page(page)              # 左:強調同頁的原始欄位
+        lv.highlight_index(self._mark_idx)       # 左:強調同一處
         self._update_mark_label()
 
     def _update_mark_label(self):
