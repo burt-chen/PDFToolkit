@@ -385,6 +385,7 @@ class App:
         self._view_body = None
         self._view_viewers = []
         self._view_paned = None
+        self._view_sync_lock = False      # 同步時的防迴圈鎖(兩邊互推保護)
         self._view_hint = ttk.Label(
             self.tab_view,
             text="在「取代」分頁的掃描結果上按右鍵 →「檢視」。\n"
@@ -732,6 +733,7 @@ class App:
         if data is None:
             v = viewer.create_frame(area, show_toolbar=False)
             v.pack(fill="both", expand=True)
+            v.app.show_search()                  # 各自的搜尋面板
             self._view_viewers = [v.app]
             body.after(60, lambda: v.app.open_bytes(orig_bytes, name))
         else:
@@ -750,9 +752,14 @@ class App:
                       foreground="#067").pack(anchor="w", padx=6, pady=(2, 0))
             rv = viewer.create_frame(right, show_toolbar=False)
             rv.pack(fill="both", expand=True)
+            lv.app.show_search()                 # 左右各自的搜尋面板
+            rv.app.show_search()
             self._view_viewers = [lv.app, rv.app]
-            lv.app.set_sync(rv.app.sync_to)      # 捲動同步(兩邊互相帶動)
-            rv.app.set_sync(lv.app.sync_to)
+            # 滾輪捲動:比例同步;點選某邊搜尋結果:另一邊跳到同一頁。皆過防迴圈鎖。
+            lv.app.set_sync(lambda f: self._sync_other(rv.app, frac=f))
+            rv.app.set_sync(lambda f: self._sync_other(lv.app, frac=f))
+            lv.app.on_match_jump = lambda p: self._sync_other(rv.app, page=p)
+            rv.app.on_match_jump = lambda p: self._sync_other(lv.app, page=p)
             body.after(60, lambda: lv.app.open_bytes(orig_bytes, name))
             body.after(60, lambda: rv.app.open_bytes(data, name))
             body.after(160, self._center_view_sash)
@@ -787,13 +794,21 @@ class App:
                        side="left", padx=(6, 2))
         ttk.Button(bar, text="適合頁面",
                    command=lambda: self._view_each("fit_page")).pack(side="left")
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
-        self._view_search = tk.StringVar()
-        sent = ttk.Entry(bar, textvariable=self._view_search, width=20)
-        sent.pack(side="left")
-        sent.bind("<Return>", self._view_do_search)
-        ttk.Button(bar, text="搜尋", command=self._view_do_search).pack(
-            side="left", padx=(4, 0))
+        ttk.Label(bar, text="（翻頁／縮放同步兩邊；搜尋請用各面板右側欄位）",
+                  foreground="#888").pack(side="left", padx=10)
+
+    def _sync_other(self, target, frac=None, page=None):
+        """把另一面板同步到指定位置(page 優先)。防迴圈鎖避免兩邊互相觸發。"""
+        if self._view_sync_lock:
+            return
+        self._view_sync_lock = True
+        try:
+            if page is not None:
+                target.sync_to_page(page)
+            elif frac is not None:
+                target.sync_to(frac)
+        finally:
+            self._view_sync_lock = False
 
     def _view_each(self, method):
         for v in self._view_viewers:
@@ -809,11 +824,6 @@ class App:
             return
         for v in self._view_viewers:
             v.show_page(idx)
-
-    def _view_do_search(self, _evt=None):
-        text = self._view_search.get()
-        for v in self._view_viewers:
-            v.search(text)
 
     def _refresh_view_toolbar(self):
         if not self._view_viewers:

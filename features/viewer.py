@@ -81,10 +81,11 @@ class App:
         self._matches = []               # [{page, rect(x0,y0,x1,y1), snippet}]
         self._active_match = None        # 目前標示的那一筆
 
-        # 外部驅動(供比對檢視:共用工具列 + 同步捲動)
+        # 外部驅動(供比對檢視:共用工具列 + 同步捲動 + 點選結果跨邊跳頁)
         self._sync_cb = None             # 本檢視器捲動時回呼 fn(fraction)
         self._sync_lock = False          # 被動捲動中,避免回呼造成兩邊互推
         self.on_state = None             # 頁碼/縮放變動時回呼(更新外部工具列)
+        self.on_match_jump = None        # 點選搜尋結果跳頁時回呼 fn(page_index)
 
         # 嵌入時不動全域 ttk 樣式/字型(同 splitter.py 處理)
         if isinstance(root, (tk.Tk, tk.Toplevel)):
@@ -457,16 +458,18 @@ class App:
                 self._free(i)
 
     def _update_current_page(self):
-        """依捲動位置更新「目前頁」(可視區頂端的那頁)。"""
+        """依捲動位置更新「目前頁」(可視區頂端的那頁)。
+
+        與 _scroll_to_page 的「-GAP 邊距」一致:目前頁 = 頁頂(含 GAP 容差)仍在
+        可視頂端以上的最後一頁。避免落在頁間距時被算成前一頁而差 1。"""
         if not self.layout:
             return
         top = self.canvas.canvasy(0)
         idx = 0
-        # 取第一個底端仍在可視頂端以下的頁(= 最上方該列的第一頁)
         for i, lay in enumerate(self.layout):
-            if lay["y"] + lay["h"] > top + 4:
-                idx = i
+            if lay["y"] - GAP > top + 1:    # 此頁明顯起始於可視頂端之下 → 停
                 break
+            idx = i
         self.page_index = idx
         self.var_page.set(str(idx + 1))
 
@@ -668,9 +671,30 @@ class App:
             lay = self.layout[page]
             y = lay["y"] + m["rect"][1] * self.scale \
                 - self.canvas.winfo_height() * 0.25
-            self.canvas.yview_moveto(max(0.0, min(y / self._content_h, 1.0)))
+            # 此處捲動不觸發比例同步(改由下方 on_match_jump 明確帶另一邊到同一頁)
+            self._sync_lock = True
+            try:
+                self.canvas.yview_moveto(max(0.0, min(y / self._content_h, 1.0)))
+            finally:
+                self._sync_lock = False
         self.page_index = page
         self.var_page.set(str(page + 1))
+        self._render_visible()
+        self._draw_highlight()
+        self._notify_state()
+        if self.on_match_jump is not None:
+            try:
+                self.on_match_jump(page)
+            except Exception:
+                pass
+
+    def sync_to_page(self, idx):
+        """被動跳到指定頁(供另一面板點選搜尋結果時同步;不回呼避免互推)。"""
+        self._sync_lock = True
+        try:
+            self.show_page(idx)
+        finally:
+            self._sync_lock = False
         self._render_visible()
         self._draw_highlight()
 
@@ -712,16 +736,10 @@ class App:
             except Exception:
                 pass
 
-    def search(self, text):
-        """以指定文字搜尋並跳到第一筆(供外部共用工具列驅動)。空字串則清除。"""
-        self.var_search.set(text or "")
-        self._do_search()
-        if self._matches:
-            try:
-                self.tv.selection_set("0")    # 觸發跳頁與螢光標示
-                self.tv.focus("0")
-            except Exception:
-                pass
+    def show_search(self):
+        """顯示搜尋結果面板(供比對檢視:左右各自獨立搜尋、各自點選跳轉)。"""
+        if not self.search_visible:
+            self._toggle_search()
 
 
 def create_frame(parent, presets_dir=None, show_toolbar=True):
