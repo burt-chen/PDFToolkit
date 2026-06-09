@@ -736,10 +736,9 @@ class App:
             except Exception:
                 pass
 
-    def show_search(self):
-        """顯示搜尋結果面板(供比對檢視:左右各自獨立搜尋、各自點選跳轉)。"""
-        if not self.search_visible:
-            self._toggle_search()
+    def toggle_search(self):
+        """切換搜尋結果面板顯示/隱藏(供外部:各面板標題旁的搜尋鈕)。"""
+        self._toggle_search()
 
 
 def create_frame(parent, presets_dir=None, show_toolbar=True):

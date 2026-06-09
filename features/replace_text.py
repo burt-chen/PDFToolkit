@@ -714,7 +714,6 @@ class App:
         except Exception as e:
             messagebox.showerror("錯誤", f"無法載入檢視器：\n{e}")
             return
-        bold = ("Microsoft JhengHei UI", 12, "bold")
         # 清掉舊內容(銷毀舊檢視器會觸發其關檔)
         if self._view_hint is not None:
             self._view_hint.destroy()
@@ -731,41 +730,47 @@ class App:
         area = ttk.Frame(body)
         area.pack(fill="both", expand=True, padx=6, pady=(2, 6))
         if data is None:
-            v = viewer.create_frame(area, show_toolbar=False)
-            v.pack(fill="both", expand=True)
-            v.app.show_search()                  # 各自的搜尋面板
-            self._view_viewers = [v.app]
-            body.after(60, lambda: v.app.open_bytes(orig_bytes, name))
+            vf = self._add_view_pane(area, viewer, "原始檔案", "#000")
+            self._view_viewers = [vf.app]
+            body.after(60, lambda: vf.app.open_bytes(orig_bytes, name))
         else:
             paned = ttk.PanedWindow(area, orient="horizontal")
             paned.pack(fill="both", expand=True)
             self._view_paned = paned
             left = ttk.Frame(paned)
             paned.add(left, weight=1)
-            ttk.Label(left, text="原始檔案", font=bold).pack(
-                anchor="w", padx=6, pady=(2, 0))
-            lv = viewer.create_frame(left, show_toolbar=False)
-            lv.pack(fill="both", expand=True)
+            lvf = self._add_view_pane(left, viewer, "原始檔案", "#000")
             right = ttk.Frame(paned)
             paned.add(right, weight=1)
-            ttk.Label(right, text=f"取代後預覽（{n} 處）", font=bold,
-                      foreground="#067").pack(anchor="w", padx=6, pady=(2, 0))
-            rv = viewer.create_frame(right, show_toolbar=False)
-            rv.pack(fill="both", expand=True)
-            lv.app.show_search()                 # 左右各自的搜尋面板
-            rv.app.show_search()
-            self._view_viewers = [lv.app, rv.app]
+            rvf = self._add_view_pane(
+                right, viewer, f"取代後預覽（{n} 處）", "#067")
+            lv, rv = lvf.app, rvf.app
+            self._view_viewers = [lv, rv]
             # 滾輪捲動:比例同步;點選某邊搜尋結果:另一邊跳到同一頁。皆過防迴圈鎖。
-            lv.app.set_sync(lambda f: self._sync_other(rv.app, frac=f))
-            rv.app.set_sync(lambda f: self._sync_other(lv.app, frac=f))
-            lv.app.on_match_jump = lambda p: self._sync_other(rv.app, page=p)
-            rv.app.on_match_jump = lambda p: self._sync_other(lv.app, page=p)
-            body.after(60, lambda: lv.app.open_bytes(orig_bytes, name))
-            body.after(60, lambda: rv.app.open_bytes(data, name))
+            lv.set_sync(lambda f: self._sync_other(rv, frac=f))
+            rv.set_sync(lambda f: self._sync_other(lv, frac=f))
+            lv.on_match_jump = lambda p: self._sync_other(rv, page=p)
+            rv.on_match_jump = lambda p: self._sync_other(lv, page=p)
+            body.after(60, lambda: lv.open_bytes(orig_bytes, name))
+            body.after(60, lambda: rv.open_bytes(data, name))
             body.after(160, self._center_view_sash)
         # 工具列顯示由第一個(主)檢視器回報頁碼/縮放
         self._view_viewers[0].on_state = self._refresh_view_toolbar
         self.notebook.select(self.tab_view)
+
+    def _add_view_pane(self, parent, viewer, title, color):
+        """在 parent 內建一個面板:標題列(標題 +「🔍 搜尋」鈕)+ 檢視器。
+        搜尋面板預設隱藏,按標題旁的搜尋鈕才切換顯示。回傳檢視器 frame。"""
+        head = ttk.Frame(parent)
+        head.pack(fill="x", padx=6, pady=(2, 0))
+        ttk.Label(head, text=title,
+                  font=("Microsoft JhengHei UI", 12, "bold"),
+                  foreground=color).pack(side="left")
+        vf = viewer.create_frame(parent, show_toolbar=False)
+        vf.pack(fill="both", expand=True)
+        ttk.Button(head, text="🔍 搜尋", width=8,
+                   command=vf.app.toggle_search).pack(side="left", padx=(8, 0))
+        return vf
 
     def _build_view_toolbar(self, parent):
         """單一共用工具列,操作會套用到所有面板(原始 + 取代後)。無「開啟」鈕。"""
@@ -794,7 +799,7 @@ class App:
                        side="left", padx=(6, 2))
         ttk.Button(bar, text="適合頁面",
                    command=lambda: self._view_each("fit_page")).pack(side="left")
-        ttk.Label(bar, text="（翻頁／縮放同步兩邊；搜尋請用各面板右側欄位）",
+        ttk.Label(bar, text="（翻頁／縮放同步兩邊；搜尋請按各面板標題旁的「🔍 搜尋」）",
                   foreground="#888").pack(side="left", padx=10)
 
     def _sync_other(self, target, frac=None, page=None):
