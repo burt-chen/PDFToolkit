@@ -388,6 +388,9 @@ class App:
         self._view_viewers = []
         self._view_paned = None
         self._view_sync_lock = False      # 同步時的防迴圈鎖(兩邊互推保護)
+        self._mark_text = ""              # 取代處導覽:用來定位的取代內容
+        self._mark_total = 0
+        self._mark_idx = 0
         self._view_hint = ttk.Label(
             self.tab_view,
             text="在「取代」分頁的掃描結果上按右鍵 →「檢視」。\n"
@@ -697,6 +700,8 @@ class App:
                 data, n = None, 0
             if not n:                            # 實際沒取代到 → 當未命中
                 data = None
+            else:
+                self._mark_text = self.var_replace.get()   # 取代處導覽定位用
         self._show_view(r["name"], orig, data, n)
 
     def _show_view(self, name, orig_bytes, data, n):
@@ -717,6 +722,7 @@ class App:
         body.pack(fill="both", expand=True)
         self._view_body = body
         self._view_paned = None
+        self._mark_total = 0              # 重置取代處導覽(新檢視重新計算)
 
         self._build_view_toolbar(body)
 
@@ -747,13 +753,13 @@ class App:
             body.after(60, lambda: lv.open_bytes(orig_bytes, name))
             body.after(60, lambda: rv.open_bytes(data, name))
             body.after(160, self._center_view_sash)
+            body.after(260, self._init_marks)   # 載入後標示取代處、啟用導覽
         # 工具列顯示由第一個(主)檢視器回報頁碼/縮放
         self._view_viewers[0].on_state = self._refresh_view_toolbar
         self.notebook.select(self.tab_view)
 
     def _add_view_pane(self, parent, viewer, title, color):
-        """在 parent 內建一個面板:標題列(標題 +「🔍 搜尋」鈕)+ 檢視器。
-        搜尋面板預設隱藏,按標題旁的搜尋鈕才切換顯示。回傳檢視器 frame。"""
+        """在 parent 內建一個面板:標題列 + 檢視器。回傳檢視器 frame。"""
         head = ttk.Frame(parent)
         head.pack(fill="x", padx=6, pady=(2, 0))
         ttk.Label(head, text=title,
@@ -761,8 +767,6 @@ class App:
                   foreground=color).pack(side="left")
         vf = viewer.create_frame(parent, show_toolbar=False)
         vf.pack(fill="both", expand=True)
-        ttk.Button(head, text="🔍 搜尋", width=8,
-                   command=vf.app.toggle_search).pack(side="left", padx=(8, 0))
         return vf
 
     def _build_view_toolbar(self, parent):
@@ -792,8 +796,46 @@ class App:
                        side="left", padx=(6, 2))
         ttk.Button(bar, text="適合頁面",
                    command=lambda: self._view_each("fit_page")).pack(side="left")
-        ttk.Label(bar, text="（翻頁／縮放同步兩邊；搜尋請按各面板標題旁的「🔍 搜尋」）",
-                  foreground="#888").pack(side="left", padx=10)
+        # 取代處導覽(雙面板且有取代時,由 _init_marks 顯示在這之前)
+        self._mark_anchor = ttk.Label(
+            bar, text="（翻頁／縮放／取代處導覽皆同步兩邊）", foreground="#888")
+        self._mark_anchor.pack(side="left", padx=10)
+        self._mark_sep = ttk.Separator(bar, orient="vertical")
+        self._mark_prev_btn = ttk.Button(bar, text="◀ 取代處", width=8,
+                                         command=lambda: self._goto_mark(-1))
+        self._mark_lbl = ttk.Label(bar, text="", foreground="#c0392b")
+        self._mark_next_btn = ttk.Button(bar, text="取代處 ▶", width=8,
+                                         command=lambda: self._goto_mark(1))
+
+    def _init_marks(self):
+        """雙面板:在取代後(右)面板標示所有取代處,並啟用工具列「取代處」導覽。
+        以搜尋『取代內容』在取代後 PDF 定位(你的情境=統一新值,精準對應取代處)。"""
+        if len(self._view_viewers) != 2:
+            return
+        rv = self._view_viewers[1]
+        text = (self._mark_text or "").strip()
+        if rv.doc is None or not text:
+            return
+        rv.highlight_all = True                  # 全部取代處淡黃標示
+        self._mark_total = rv.run_search(text)   # 跳到第一處(右捲動,左同步)
+        self._mark_idx = 0
+        if self._mark_total > 0:
+            self._mark_sep.pack(side="left", fill="y", padx=6,
+                                before=self._mark_anchor)
+            self._mark_prev_btn.pack(side="left", before=self._mark_anchor)
+            self._mark_lbl.pack(side="left", padx=4, before=self._mark_anchor)
+            self._mark_next_btn.pack(side="left", before=self._mark_anchor)
+            self._update_mark_label()
+
+    def _goto_mark(self, d):
+        if self._mark_total <= 0 or len(self._view_viewers) != 2:
+            return
+        self._mark_idx = max(0, min(self._mark_total - 1, self._mark_idx + d))
+        self._view_viewers[1].goto_match_index(self._mark_idx)
+        self._update_mark_label()
+
+    def _update_mark_label(self):
+        self._mark_lbl.config(text=f"取代處 {self._mark_idx + 1}/{self._mark_total}")
 
     def _sync_other(self, target, frac=None, page=None):
         """把另一面板同步到指定位置(page 優先)。防迴圈鎖避免兩邊互相觸發。"""
@@ -919,7 +961,8 @@ HELP_TEXT = """PDF 文字取代 — 使用說明
   2. 填「搜尋文字」與「取代為」，視需要選重寫字型
   3. 「掃描預覽」→ 看每個檔案命中幾處、狀態
      （選取一列後切到上方「檢視」分頁即可預覽：未命中只顯示原始檔；命中則
-       左右並排原始與取代後預覽，捲動同步、共用一個工具列）
+       左右並排原始與取代後預覽。取代後的每一處都會以螢光標示，可用工具列
+       「◀ 取代處 ▶」逐一檢視，左邊會同步到同一頁對照）
   4. 「執行取代」→ 輸出到上方指定的資料夾
 
 說明

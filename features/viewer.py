@@ -82,6 +82,7 @@ class App:
         self.search_visible = False
         self._matches = []               # [{page, rect(x0,y0,x1,y1), snippet}]
         self._active_match = None        # 目前標示的那一筆
+        self.highlight_all = False       # True:所有命中都淡黃標示(用於標示取代處)
 
         # 外部驅動(供比對檢視:共用工具列 + 同步捲動 + 點選結果跨邊跳頁)
         self._sync_cb = None             # 本檢視器捲動時回呼 fn(fraction)
@@ -667,14 +668,19 @@ class App:
         except (ValueError, IndexError):
             pass
 
-    def _goto_match(self, m):
-        """跳到該筆所在頁,讓符合處約位於可視區上方 1/4,並畫螢光框。"""
+    def _goto_match(self, m, center=True):
+        """跳到該筆所在頁並畫螢光框。
+        center=True:符合處置於可視區上方約 1/4(搜尋用);
+        center=False:對齊頁頂,與 sync_to_page 一致(取代處導覽,兩邊才不錯位)。"""
         self._active_match = m
         page = m["page"]
         if self.layout and self._content_h > 0:
             lay = self.layout[page]
-            y = lay["y"] + m["rect"][1] * self.scale \
-                - self.canvas.winfo_height() * 0.25
+            if center:
+                y = lay["y"] + m["rect"][1] * self.scale \
+                    - self.canvas.winfo_height() * 0.25
+            else:
+                y = lay["y"] - GAP        # 頁頂(同 _scroll_to_page)
             # 此處捲動不觸發比例同步(改由下方 on_match_jump 明確帶另一邊到同一頁)
             self._sync_lock = True
             try:
@@ -703,20 +709,27 @@ class App:
         self._draw_highlight()
 
     def _draw_highlight(self):
-        """把目前選取的符合處畫成螢光框(座標依目前 scale 即時換算)。"""
+        """畫螢光框。highlight_all=True 時所有命中淡黃標示,目前選取者再加紅框。"""
         self.canvas.delete("search_hl")
-        m = self._active_match
-        if not m or not self.layout:
+        if not self.layout:
             return
+        if self.highlight_all:
+            for m in self._matches:
+                if m is not self._active_match:
+                    self._draw_hl_rect(m, "#fff0a0", "#e6b800", 1)
+        if self._active_match is not None:
+            self._draw_hl_rect(self._active_match, "#ffe14d", "#d40000", 2)
+        self.canvas.tag_raise("search_hl")
+
+    def _draw_hl_rect(self, m, fill, outline, width):
         lay = self.layout[m["page"]]
         x0, y0, x1, y1 = m["rect"]
         s = self.scale
         self.canvas.create_rectangle(
             lay["x"] + x0 * s - 2, lay["y"] + y0 * s - 1,
             lay["x"] + x1 * s + 2, lay["y"] + y1 * s + 1,
-            outline="#d40000", width=2, fill="#ffe14d", stipple="gray50",
+            outline=outline, width=width, fill=fill, stipple="gray50",
             tags=("search_hl",))
-        self.canvas.tag_raise("search_hl")
 
     # ----------------------------------------------- 外部驅動(比對檢視共用)
     def set_sync(self, cb):
@@ -743,6 +756,21 @@ class App:
     def toggle_search(self):
         """切換搜尋結果面板顯示/隱藏(供外部:各面板標題旁的搜尋鈕)。"""
         self._toggle_search()
+
+    def run_search(self, text):
+        """以指定文字搜尋並跳到第一筆(供外部標示取代處)。回傳命中數。"""
+        self.var_search.set(text or "")
+        self._do_search()
+        if self._matches:
+            self._goto_match(self._matches[0], center=False)
+        else:
+            self._draw_highlight()
+        return len(self._matches)
+
+    def goto_match_index(self, i):
+        """跳到第 i 筆命中(供外部取代處導覽,對齊頁頂與另一邊一致)。"""
+        if 0 <= i < len(self._matches):
+            self._goto_match(self._matches[i], center=False)
 
 
 def create_frame(parent, presets_dir=None, show_toolbar=True, show_open=True):
