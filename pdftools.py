@@ -246,13 +246,14 @@ class App:
                 # 共用 presets_dir(嵌入 launcher 時由外部覆寫)
                 if self.presets_dir is not None and "presets_dir" not in kwargs:
                     kwargs["presets_dir"] = self.presets_dir
-                # 只對「接受 open_in_viewer」的功能注入回呼,讓它能把檔案
-                # 丟到「檢視 PDF」開啟(如文字取代雙擊檔名);其餘功能簽名不必改。
+                # 只對「接受對應參數」的功能注入檢視器回呼,讓它能把檔案/預覽
+                # 丟到「檢視 PDF」開啟(如文字取代右鍵);其餘功能簽名不必改。
                 try:
                     params = inspect.signature(factory).parameters
-                    if ("open_in_viewer" in params or
-                            any(p.kind == p.VAR_KEYWORD for p in params.values())):
-                        kwargs.setdefault("open_in_viewer", self.open_in_viewer)
+                    has_kw = any(p.kind == p.VAR_KEYWORD for p in params.values())
+                    for cb in ("open_in_viewer", "open_bytes_in_viewer"):
+                        if cb in params or has_kw:
+                            kwargs.setdefault(cb, getattr(self, cb))
                 except (TypeError, ValueError):
                     pass
                 frame = factory(self.content, **kwargs)
@@ -269,12 +270,11 @@ class App:
         self._current_id = fid
 
     # ------------------------------------------------ 跨功能:在檢視器開檔
-    def open_in_viewer(self, path):
-        """切換到「檢視 PDF」並開啟指定檔案。供其他功能(如文字取代雙擊檔名)呼叫。"""
+    def _activate_viewer(self):
+        """切換到「檢視 PDF」功能(同步側邊欄、建立畫面),回傳其 App 供開檔。"""
         feat = next((f for f in FEATURES if f["id"] == "viewer"), None)
         if feat is None:
-            return
-        # 同步側邊欄選取(視覺一致),再確保功能畫面已建立並顯示
+            return None
         for iid, f in self._iid_to_feat.items():
             if f["id"] == "viewer":
                 self.tree.selection_set(iid)
@@ -282,10 +282,23 @@ class App:
                 break
         self._show_feature(feat)              # 已是目前功能時為無動作
         frame = self._feature_frames.get(feat["id"])
-        app = getattr(frame, "app", None)
+        return getattr(frame, "app", None)
+
+    def open_in_viewer(self, path):
+        """切換到「檢視 PDF」並開啟指定檔案。供其他功能(如文字取代右鍵)呼叫。"""
+        app = self._activate_viewer()
         if app is not None:
             try:
                 app.open_path(path)
+            except Exception:
+                pass
+
+    def open_bytes_in_viewer(self, data, name="(預覽)"):
+        """切換到「檢視 PDF」並以記憶體 bytes 開啟(供取代後預覽,不落地)。"""
+        app = self._activate_viewer()
+        if app is not None:
+            try:
+                app.open_bytes(data, name)
             except Exception:
                 pass
 

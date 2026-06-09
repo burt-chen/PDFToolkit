@@ -303,13 +303,17 @@ FONT = ("Microsoft JhengHei UI", 12)
 
 
 class App:
-    def __init__(self, root, presets_dir=None, open_in_viewer=None):
+    def __init__(self, root, presets_dir=None, open_in_viewer=None,
+                 open_bytes_in_viewer=None):
         """root 可為 tk.Tk / Toplevel / Frame(嵌入用)。
         presets_dir: 指定預設檔資料夾;None 時放在 app_dir()。
-        open_in_viewer: 回呼 fn(path);嵌入 launcher 時用來把檔案丟到「檢視 PDF」開啟。
-                        獨立執行為 None,改用系統預設程式開檔。"""
+        open_in_viewer: 回呼 fn(path);把檔案丟到「檢視 PDF」開啟(看原始檔)。
+        open_bytes_in_viewer: 回呼 fn(data, name);以記憶體 bytes 在檢視器開啟
+                              (看取代後預覽,不落地)。兩者獨立執行時為 None,
+                              改用系統預設程式開檔。"""
         self.root = root
         self.open_in_viewer = open_in_viewer
+        self.open_bytes_in_viewer = open_bytes_in_viewer
         if isinstance(root, (tk.Tk, tk.Toplevel)):
             self.root.title("PDF 文字取代")
             self.root.geometry("1040x780")
@@ -459,7 +463,7 @@ class App:
         # 預覽表
         prev = ttk.LabelFrame(f, text="3. 掃描結果")
         prev.pack(fill="both", expand=True, padx=8, pady=4)
-        ttk.Label(prev, text="提示：在檔名上按右鍵可在「檢視 PDF」開啟該檔。",
+        ttk.Label(prev, text="提示：在檔名上按右鍵可檢視原始檔，或預覽取代後結果。",
                   foreground="#666").pack(anchor="w", padx=8, pady=(2, 0))
         cols = ("name", "hits", "status")
         self.tree = ttk.Treeview(prev, columns=cols, show="headings", height=10)
@@ -476,10 +480,12 @@ class App:
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         vsb.pack(side="left", fill="y", pady=4)
-        # 右鍵選單:在「檢視 PDF」開啟該檔
+        # 右鍵選單:檢視原始檔 / 預覽取代後結果
         self.row_menu = tk.Menu(self.tree, tearoff=0)
-        self.row_menu.add_command(label="在「檢視 PDF」開啟",
+        self.row_menu.add_command(label="檢視原始檔案",
                                   command=self._open_selected_in_viewer)
+        self.row_menu.add_command(label="預覽取代後結果",
+                                  command=self._preview_selected_replaced)
         self.tree.bind("<Button-3>", self._on_row_rightclick)
 
     # ----------------------------------------------------------------- 資料夾
@@ -612,14 +618,20 @@ class App:
         finally:
             self.row_menu.grab_release()
 
-    def _open_selected_in_viewer(self, _evt=None):
-        """把選取列的檔丟到內建「檢視 PDF」開啟;獨立執行則用系統預設程式。"""
+    def _selected_result(self):
+        """回傳右鍵/選取列對應的 result dict;沒有則 None。"""
         sel = self.tree.selection()
         if not sel:
-            return
+            return None
         try:
-            r = self.results[int(sel[0])]
+            return self.results[int(sel[0])]
         except (ValueError, IndexError):
+            return None
+
+    def _open_selected_in_viewer(self, _evt=None):
+        """把選取列的原始檔丟到內建「檢視 PDF」開啟;獨立執行則用系統預設程式。"""
+        r = self._selected_result()
+        if r is None:
             return
         path = r["path"]
         if not os.path.exists(path):
@@ -632,6 +644,56 @@ class App:
                 os.startfile(path)
             except Exception as e:
                 messagebox.showerror("錯誤", f"無法開啟：\n{e}")
+
+    def _build_replaced_bytes(self, path):
+        """以目前設定在記憶體產生取代後的 PDF。回傳 (bytes, 取代處數)。"""
+        fitz = self.fitz or _import_fitz()
+        self.fitz = fitz
+        doc = fitz.open(stream=Path(path).read_bytes(), filetype="pdf")
+        try:
+            n = replace_in_doc(
+                fitz, doc, self.var_search.get(), self.var_replace.get(),
+                self.var_font.get(), self.var_field_mode.get())
+            if n:
+                try:
+                    doc.subset_fonts()
+                except Exception:
+                    pass
+            buf = io.BytesIO()
+            doc.save(buf, garbage=4, deflate=True)
+            return buf.getvalue(), n
+        finally:
+            doc.close()
+
+    def _preview_selected_replaced(self, _evt=None):
+        """右鍵「預覽取代後結果」:在記憶體跑取代,丟到檢視器顯示(不寫檔)。"""
+        r = self._selected_result()
+        if r is None:
+            return
+        if not _norm(self.var_search.get()).strip():
+            messagebox.showwarning("提示", "請先輸入搜尋文字")
+            return
+        path = r["path"]
+        if not os.path.exists(path):
+            messagebox.showwarning("提示", f"找不到檔案：\n{path}")
+            return
+        try:
+            data, n = self._build_replaced_bytes(path)
+        except Exception as e:
+            messagebox.showerror("錯誤", f"產生預覽失敗：\n{e}")
+            return
+        name = (f"{r['name']}（取代後預覽，{n} 處）" if n
+                else f"{r['name']}（未命中，與原檔相同）")
+        if self.open_bytes_in_viewer is not None:
+            self.open_bytes_in_viewer(data, name)
+        elif hasattr(os, "startfile"):     # 獨立執行:寫暫存檔再用系統程式開
+            import tempfile
+            tmp = os.path.join(tempfile.gettempdir(), f"_preview_{r['name']}")
+            try:
+                Path(tmp).write_bytes(data)
+                os.startfile(tmp)
+            except Exception as e:
+                messagebox.showerror("錯誤", f"無法開啟預覽:\n{e}")
 
     # ----------------------------------------------------------------- 取代
     def _run_replace(self):
@@ -741,10 +803,12 @@ HELP_TEXT = """PDF 文字取代 — 使用說明
 """
 
 
-def create_frame(parent, presets_dir=None, open_in_viewer=None):
+def create_frame(parent, presets_dir=None, open_in_viewer=None,
+                 open_bytes_in_viewer=None):
     """供 PDF 工具集主程式嵌入用。回傳含完整取代 UI 的 Frame。"""
     frame = ttk.Frame(parent)
-    App(frame, presets_dir=presets_dir, open_in_viewer=open_in_viewer)
+    App(frame, presets_dir=presets_dir, open_in_viewer=open_in_viewer,
+        open_bytes_in_viewer=open_bytes_in_viewer)
     return frame
 
 

@@ -223,6 +223,21 @@ class App:
         except Exception as e:
             messagebox.showerror("錯誤", f"無法開啟：\n{e}")
             return
+        self._load_doc(doc, Path(path).name, path)
+
+    def open_bytes(self, data, name="(預覽)"):
+        """從記憶體 bytes 開啟 PDF(供「取代後預覽」等不落地的情境)。"""
+        try:
+            fitz = self.fitz or _import_fitz()
+            self.fitz = fitz
+            doc = fitz.open(stream=data, filetype="pdf")
+        except Exception as e:
+            messagebox.showerror("錯誤", f"無法開啟：\n{e}")
+            return
+        self._load_doc(doc, name, None)
+
+    def _load_doc(self, doc, display_name, path):
+        """共用:換掉目前文件並重建畫面。path 為來源路徑(記憶體開檔時為 None)。"""
         if self.doc:
             try:
                 self.doc.close()
@@ -234,7 +249,7 @@ class App:
         self.fit_mode = "page"           # 開檔預設:適合頁面
         self.canvas.itemconfigure(self._hint_id, text="")
         self.lbl_total.config(text=f"/ {len(doc)}")
-        self.lbl_status.config(text=f"{Path(path).name}（共 {len(doc)} 頁）")
+        self.lbl_status.config(text=f"{display_name}（共 {len(doc)} 頁）")
         self._clear_search()
         self._build_pages()
         self.canvas.yview_moveto(0.0)
