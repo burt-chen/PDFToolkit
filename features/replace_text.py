@@ -33,6 +33,21 @@ def app_dir():
     return Path(__file__).resolve().parent
 
 
+def _load_viewer_module():
+    """載入同目錄的 viewer 模組(供並排比對視窗用)。
+    先試套件匯入(透過 launcher);失敗則以檔案路徑載入(獨立執行)。"""
+    try:
+        from features import viewer as mod
+        return mod
+    except Exception:
+        import importlib.util
+        vp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer.py")
+        spec = importlib.util.spec_from_file_location("viewer", vp)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+
 def _import_fitz():
     """延遲匯入 PyMuPDF,沒裝時給清楚訊息。"""
     try:
@@ -463,7 +478,9 @@ class App:
         # 預覽表
         prev = ttk.LabelFrame(f, text="3. 掃描結果")
         prev.pack(fill="both", expand=True, padx=8, pady=4)
-        ttk.Label(prev, text="提示：在檔名上按右鍵可檢視原始檔，或預覽取代後結果。",
+        ttk.Label(prev,
+                  text="提示：在檔名上按右鍵可檢視原始檔、預覽取代後結果，"
+                       "或並排比對前後差異。",
                   foreground="#666").pack(anchor="w", padx=8, pady=(2, 0))
         cols = ("name", "hits", "status")
         self.tree = ttk.Treeview(prev, columns=cols, show="headings", height=10)
@@ -480,12 +497,14 @@ class App:
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         vsb.pack(side="left", fill="y", pady=4)
-        # 右鍵選單:檢視原始檔 / 預覽取代後結果
+        # 右鍵選單:檢視原始檔 / 預覽取代後 / 並排比對
         self.row_menu = tk.Menu(self.tree, tearoff=0)
         self.row_menu.add_command(label="檢視原始檔案",
                                   command=self._open_selected_in_viewer)
         self.row_menu.add_command(label="預覽取代後結果",
                                   command=self._preview_selected_replaced)
+        self.row_menu.add_command(label="並排比對：原始 vs 取代後",
+                                  command=self._compare_selected)
         self.tree.bind("<Button-3>", self._on_row_rightclick)
 
     # ----------------------------------------------------------------- 資料夾
@@ -665,23 +684,31 @@ class App:
         finally:
             doc.close()
 
-    def _preview_selected_replaced(self, _evt=None):
-        """右鍵「預覽取代後結果」:在記憶體跑取代,丟到檢視器顯示(不寫檔)。"""
+    def _prepare_replaced(self):
+        """共用:取選取列、檢查搜尋字串/檔案,並產生取代後 bytes。
+        回傳 (r, data, n);任何條件不符則跳訊息並回傳 None。"""
         r = self._selected_result()
         if r is None:
-            return
+            return None
         if not _norm(self.var_search.get()).strip():
             messagebox.showwarning("提示", "請先輸入搜尋文字")
-            return
-        path = r["path"]
-        if not os.path.exists(path):
-            messagebox.showwarning("提示", f"找不到檔案：\n{path}")
-            return
+            return None
+        if not os.path.exists(r["path"]):
+            messagebox.showwarning("提示", f"找不到檔案：\n{r['path']}")
+            return None
         try:
-            data, n = self._build_replaced_bytes(path)
+            data, n = self._build_replaced_bytes(r["path"])
         except Exception as e:
             messagebox.showerror("錯誤", f"產生預覽失敗：\n{e}")
+            return None
+        return r, data, n
+
+    def _preview_selected_replaced(self, _evt=None):
+        """右鍵「預覽取代後結果」:在記憶體跑取代,丟到檢視器顯示(不寫檔)。"""
+        prep = self._prepare_replaced()
+        if prep is None:
             return
+        r, data, n = prep
         name = (f"{r['name']}（取代後預覽，{n} 處）" if n
                 else f"{r['name']}（未命中，與原檔相同）")
         if self.open_bytes_in_viewer is not None:
@@ -694,6 +721,61 @@ class App:
                 os.startfile(tmp)
             except Exception as e:
                 messagebox.showerror("錯誤", f"無法開啟預覽:\n{e}")
+
+    def _compare_selected(self, _evt=None):
+        """右鍵「並排比對」:開一個視窗,左邊原始檔、右邊取代後預覽。"""
+        prep = self._prepare_replaced()
+        if prep is None:
+            return
+        r, data, n = prep
+        self._open_compare_window(r["name"], r["path"], data, n)
+
+    def _open_compare_window(self, name, path, data, n):
+        """左右並排兩個檢視器:左=原始(檔案)、右=取代後(記憶體 bytes)。"""
+        try:
+            viewer = _load_viewer_module()
+        except Exception as e:
+            messagebox.showerror("錯誤", f"無法載入檢視器:\n{e}")
+            return
+        win = tk.Toplevel(self.root)
+        win.title(f"取代前後比對 — {name}")
+        win.geometry("1400x860")
+        try:
+            win.state("zoomed")
+        except tk.TclError:
+            pass
+
+        paned = ttk.PanedWindow(win, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+
+        left = ttk.Frame(paned)
+        paned.add(left, weight=1)
+        ttk.Label(left, text="原始檔案",
+                  font=("Microsoft JhengHei UI", 12, "bold")).pack(
+                      anchor="w", padx=8, pady=(6, 0))
+        lv = viewer.create_frame(left)
+        lv.pack(fill="both", expand=True)
+
+        right = ttk.Frame(paned)
+        paned.add(right, weight=1)
+        rtitle = (f"取代後預覽（{n} 處）" if n
+                  else "取代後預覽（未命中，與原檔相同）")
+        ttk.Label(right, text=rtitle,
+                  font=("Microsoft JhengHei UI", 12, "bold"),
+                  foreground="#067").pack(anchor="w", padx=8, pady=(6, 0))
+        rv = viewer.create_frame(right)
+        rv.pack(fill="both", expand=True)
+
+        # 延遲載入(等視窗布局好,檢視器才算得出適合頁面的縮放)並把分隔線置中
+        win.after(60, lambda: lv.app.open_path(path))
+        win.after(60, lambda: rv.app.open_bytes(data, f"{name}（取代後）"))
+
+        def _center_sash():
+            try:
+                paned.sashpos(0, max(200, win.winfo_width() // 2))
+            except Exception:
+                pass
+        win.after(150, _center_sash)
 
     # ----------------------------------------------------------------- 取代
     def _run_replace(self):
@@ -772,6 +854,7 @@ HELP_TEXT = """PDF 文字取代 — 使用說明
      要保留原檔就另選「輸出資料夾」，留空則覆蓋原檔
   2. 填「搜尋文字」與「取代為」，視需要選重寫字型
   3. 「掃描預覽」→ 看每個檔案命中幾處、狀態
+     （在結果列上按右鍵可：檢視原始檔、預覽取代後結果、或左右並排比對前後差異）
   4. 「執行取代」→ 輸出到上方指定的資料夾
 
 說明

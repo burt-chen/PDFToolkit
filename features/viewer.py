@@ -165,7 +165,9 @@ class App:
         self.canvas.bind("<Button-1>", lambda _e: self.canvas.focus_set())
         self.canvas.bind("<Prior>", lambda _e: self.prev_page())   # PageUp
         self.canvas.bind("<Next>", lambda _e: self.next_page())    # PageDown
-        self.root.bind_all("<Control-f>", self._focus_search)
+        # Ctrl+F 綁在所屬視窗(非全域),避免多個檢視器(如比對視窗)互搶,
+        # 且視窗關閉時綁定隨之消失,不留失效回呼。
+        self.root.winfo_toplevel().bind("<Control-f>", self._focus_search)
         self._setup_dnd()
 
         self.lbl_status = ttk.Label(self.root, text="", foreground="#555",
