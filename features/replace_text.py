@@ -808,18 +808,24 @@ class App:
                                          command=lambda: self._goto_mark(1))
 
     def _init_marks(self):
-        """雙面板:在取代後(右)面板標示所有取代處,並啟用工具列「取代處」導覽。
-        以搜尋『取代內容』在取代後 PDF 定位(你的情境=統一新值,精準對應取代處)。"""
+        """雙面板:右面板標示所有取代處(以『取代內容』定位)、左面板標示對應的
+        原始欄位(以『搜尋字串』=標籤定位),並啟用工具列「取代處」導覽。"""
         if len(self._view_viewers) != 2:
             return
-        rv = self._view_viewers[1]
+        lv, rv = self._view_viewers
         text = (self._mark_text or "").strip()
         if rv.doc is None or not text:
             return
-        rv.highlight_all = True                  # 全部取代處淡黃標示
-        self._mark_total = rv.run_search(text)   # 跳到第一處(右捲動,左同步)
+        rv.highlight_all = True                  # 右:全部取代處淡黃標示
+        self._mark_total = rv.run_search(text)   # 跳到第一處(右捲動,左同步頁)
         self._mark_idx = 0
+        # 左:原始檔對應欄位以搜尋字串(標籤)定位並全部標示(不跳轉)
+        label = self.var_search.get()
+        if lv.doc is not None and _norm(label).strip():
+            lv.highlight_all = True
+            lv.mark_search(label)
         if self._mark_total > 0:
+            lv.highlight_page(rv.active_page())  # 左側強調目前取代處同頁的欄位
             self._mark_sep.pack(side="left", fill="y", padx=6,
                                 before=self._mark_anchor)
             self._mark_prev_btn.pack(side="left", before=self._mark_anchor)
@@ -830,8 +836,12 @@ class App:
     def _goto_mark(self, d):
         if self._mark_total <= 0 or len(self._view_viewers) != 2:
             return
+        lv, rv = self._view_viewers
         self._mark_idx = max(0, min(self._mark_total - 1, self._mark_idx + d))
-        self._view_viewers[1].goto_match_index(self._mark_idx)
+        rv.goto_match_index(self._mark_idx)      # 右:跳到該取代處(左同步頁)
+        page = rv.active_page()
+        if page is not None:
+            lv.highlight_page(page)              # 左:強調同頁的原始欄位
         self._update_mark_label()
 
     def _update_mark_label(self):
@@ -961,8 +971,8 @@ HELP_TEXT = """PDF 文字取代 — 使用說明
   2. 填「搜尋文字」與「取代為」，視需要選重寫字型
   3. 「掃描預覽」→ 看每個檔案命中幾處、狀態
      （選取一列後切到上方「檢視」分頁即可預覽：未命中只顯示原始檔；命中則
-       左右並排原始與取代後預覽。取代後的每一處都會以螢光標示，可用工具列
-       「◀ 取代處 ▶」逐一檢視，左邊會同步到同一頁對照）
+       左右並排原始與取代後預覽。每一處取代都會以螢光標示，可用工具列
+       「◀ 取代處 ▶」逐一檢視；右邊標新值、左邊原始檔同頁標對應欄位對照）
   4. 「執行取代」→ 輸出到上方指定的資料夾
 
 說明

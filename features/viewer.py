@@ -772,6 +772,24 @@ class App:
         if 0 <= i < len(self._matches):
             self._goto_match(self._matches[i], center=False)
 
+    def mark_search(self, text):
+        """搜尋並標示全部命中(不跳轉、不設作用中)。供對照面板標示。回傳命中數。"""
+        self.var_search.set(text or "")
+        self._do_search()
+        self._active_match = None
+        self._draw_highlight()
+        return len(self._matches)
+
+    def highlight_page(self, page):
+        """把指定頁的第一個命中設為作用中並重畫(供對照面板強調同頁欄位)。"""
+        self._active_match = next(
+            (m for m in self._matches if m["page"] == page), None)
+        self._draw_highlight()
+
+    def active_page(self):
+        """目前作用中命中的頁碼(0-based);無則 None。"""
+        return self._active_match["page"] if self._active_match else None
+
 
 def create_frame(parent, presets_dir=None, show_toolbar=True, show_open=True):
     """供 PDF 工具集主程式嵌入用。回傳含檢視器 UI 的 Frame。"""
