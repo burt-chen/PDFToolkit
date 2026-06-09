@@ -167,28 +167,33 @@ def _color_to_rgb(color):
 #  core/scan + replace
 # ===========================================================================
 
-def _match_rect(bbox, ntext, nsearch, mode, direction):
-    """估算 span 內「被取代區段」的概略矩形(依字元比例,橫書取 x、直書取 y)。
+def _match_rect(chars, nsearch, mode):
+    """用每個字的實際 bbox,算出 span 內「被取代區段」的精確矩形(只框那幾個字)。
 
-    比起整段 span,框得更精準;比起事後 search_for,不受字間空格/全半形影響。
+    以逐字 NFKC 串接定位(CJK/全半形多為 1:1),找不到則退回整段。橫書/直書
+    皆適用(字元 bbox 已含位置)。chars:rawdict 的 span["chars"]。
     normal:標第一個到最後一個搜尋字串的範圍;overwrite/fill:標搜尋字串到段尾。"""
-    x0, y0, x1, y1 = bbox
-    n = len(ntext) or 1
-    start = ntext.find(nsearch)
-    if start < 0:
-        return bbox
-    if mode == "normal":
-        end = ntext.rfind(nsearch) + len(nsearch)
-    else:                              # overwrite / fill_empty:標籤起到段尾
-        end = n
-    f0, f1 = start / n, min(end, n) / n
-    dx, dy = direction
-    if abs(dy) > abs(dx):              # 直書:用 y 比例
-        return (x0, y0 + f0 * (y1 - y0), x1, y0 + f1 * (y1 - y0))
-    return (x0 + f0 * (x1 - x0), y0, x0 + f1 * (x1 - x0), y1)   # 橫書:用 x 比例
+    def _union(cs):
+        return (min(c["bbox"][0] for c in cs), min(c["bbox"][1] for c in cs),
+                max(c["bbox"][2] for c in cs), max(c["bbox"][3] for c in cs))
+    if not chars:
+        return None
+    pos_char, parts = [], []
+    for ci, ch in enumerate(chars):
+        ns = _norm(ch["c"])
+        parts.append(ns)
+        pos_char.extend([ci] * len(ns))
+    s = "".join(parts)
+    start = s.find(nsearch)
+    if start < 0 or not pos_char:
+        return _union(chars)
+    end = (s.rfind(nsearch) + len(nsearch)) if mode == "normal" else len(s)
+    end = min(end, len(pos_char))
+    return _union(chars[pos_char[start]:pos_char[end - 1] + 1])
 
 
-def _collect_targets(page, nsearch, nreplace=None, mode="normal"):
+def _collect_targets(page, nsearch, nreplace=None, mode="normal",
+                     with_rect=False):
     """掃一頁,回傳所有命中的 span 目標(不修改頁面)。
 
     mode 決定「標籤:值」欄位的處理方式:
@@ -196,13 +201,21 @@ def _collect_targets(page, nsearch, nreplace=None, mode="normal"):
       • "overwrite"  取代至文字結尾:標籤到該段文字結尾整段換成取代字串。
       • "fill_empty" 排除非文字結尾:標籤後(到段尾)已有非空白舊值則略過不動。
     任一模式都會跳過「已是目標值」的 span,避免重複執行時內容疊加。
-    """
+
+    with_rect=True:用 rawdict 取得每字 bbox,額外算出「被取代區段」精確矩形
+    (mrect),供檢視標示用;掃描計數時用 dict(較快)即可。"""
     idempotent = bool(nreplace) and (nsearch in nreplace)
     targets = []
-    for blk in page.get_text("dict")["blocks"]:
+    fmt = "rawdict" if with_rect else "dict"
+    for blk in page.get_text(fmt)["blocks"]:
         for line in blk.get("lines", []):
             for sp in line.get("spans", []):
-                ntext = _norm(sp["text"])
+                if with_rect:
+                    chars = sp.get("chars", [])
+                    text = "".join(ch["c"] for ch in chars)
+                else:
+                    chars, text = None, sp["text"]
+                ntext = _norm(text)
                 if nsearch not in ntext:
                     continue
                 if mode in ("overwrite", "fill_empty"):
@@ -214,17 +227,18 @@ def _collect_targets(page, nsearch, nreplace=None, mode="normal"):
                         continue        # 已是目標值 → 跳過(冪等)
                 elif idempotent and nreplace in ntext:
                     continue            # 一般模式:已是先前取代結果
-                targets.append({
+                tgt = {
                     "bbox": sp["bbox"],
-                    "mrect": _match_rect(sp["bbox"], ntext, nsearch, mode,
-                                         line["dir"]),
                     "origin": sp["origin"],
                     "size": sp["size"],
                     "color": sp["color"],
                     "dir": line["dir"],
                     "font": sp["font"],
                     "ntext": ntext,
-                })
+                }
+                if with_rect:
+                    tgt["mrect"] = _match_rect(chars, nsearch, mode)
+                targets.append(tgt)
     return targets
 
 
@@ -275,7 +289,8 @@ def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT,
     nreplace = _norm(replace)
     total = 0
     for page in doc:
-        targets = _collect_targets(page, nsearch, nreplace, mode)
+        targets = _collect_targets(page, nsearch, nreplace, mode,
+                                   with_rect=(marks is not None))
         if not targets:
             continue
         for t in targets:
@@ -311,9 +326,10 @@ def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT,
                 rotate=_rotate_for_dir(t["dir"]))
             total += 1
             if marks is not None:
-                # get_text/search_for 回傳「未旋轉」座標,但檢視器渲染的是「旋轉後」
-                # 頁面 → 用 rotation_matrix 轉到顯示座標系(未旋轉頁為單位矩陣)。
-                r = (fitz.Rect(t["mrect"]) * page.rotation_matrix).normalize()
+                # get_text 回傳「未旋轉」座標,但檢視器渲染的是「旋轉後」頁面 →
+                # 用 rotation_matrix 轉到顯示座標系(未旋轉頁為單位矩陣)。
+                mr = t.get("mrect") or t["bbox"]
+                r = (fitz.Rect(mr) * page.rotation_matrix).normalize()
                 marks.append({"page": page.number,
                               "rect": (r.x0, r.y0, r.x1, r.y1)})
     return total
