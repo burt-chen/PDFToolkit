@@ -152,11 +152,12 @@ def _color_to_rgb(color):
 #  core/scan + replace
 # ===========================================================================
 
-def _collect_targets(page, nsearch, nreplace=None):
+def _collect_targets(page, nsearch, nreplace=None, overwrite=False):
     """掃一頁,回傳所有命中的 span 目標(不修改頁面)。
 
-    冪等:若取代字串本身含搜尋字串(常見的「保留標籤再加內容」),且此 span
-    已包含完整的取代字串,代表先前已取代過 → 跳過,避免重複執行時內容疊加。
+    冪等(避免重複執行內容疊加):
+      • 一般模式:取代字串本身含搜尋字串、且此 span 已含完整取代字串 → 跳過。
+      • 覆蓋欄位值模式:標籤到該段文字結尾的內容已等於取代字串 → 跳過。
     """
     idempotent = bool(nreplace) and (nsearch in nreplace)
     targets = []
@@ -166,7 +167,12 @@ def _collect_targets(page, nsearch, nreplace=None):
                 ntext = _norm(sp["text"])
                 if nsearch not in ntext:
                     continue
-                if idempotent and nreplace in ntext:
+                if overwrite:
+                    # 標籤後(到段尾)已是目標值 → 視為先前已處理,跳過
+                    idx = ntext.find(nsearch)
+                    if nreplace is not None and ntext[idx:] == nreplace:
+                        continue
+                elif idempotent and nreplace in ntext:
                     continue  # 已是先前取代結果
                 targets.append({
                     "bbox": sp["bbox"],
@@ -180,7 +186,7 @@ def _collect_targets(page, nsearch, nreplace=None):
     return targets
 
 
-def scan_pdf(fitz, path, search, replace=""):
+def scan_pdf(fitz, path, search, replace="", overwrite=False):
     """掃一個 PDF。回傳 dict:
        {hits:int, has_text:bool, error:str|None}
     hits = 命中(且尚未取代過)的 span 數;has_text = 整份是否有可擷取文字。"""
@@ -197,7 +203,7 @@ def scan_pdf(fitz, path, search, replace=""):
         for page in doc:
             if not has_text and page.get_text("text").strip():
                 has_text = True
-            hits += len(_collect_targets(page, nsearch, nreplace))
+            hits += len(_collect_targets(page, nsearch, nreplace, overwrite))
     finally:
         doc.close()
     return {"hits": hits, "has_text": has_text, "error": None}
@@ -213,15 +219,19 @@ def _unique_fontname(stem, used):
     return nm
 
 
-def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT):
-    """就地在已開啟的 doc 取代文字。回傳實際取代的 span 數。"""
+def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT,
+                   overwrite=False):
+    """就地在已開啟的 doc 取代文字。回傳實際取代的 span 數。
+
+    overwrite=True(覆蓋欄位值):把每個命中 span 內「搜尋字串到該段結尾」的
+    內容整段換成取代字串,避免新值疊加在既有舊值之前。"""
     nsearch = _norm(search)
     if not nsearch:
         return 0
     nreplace = _norm(replace)
     total = 0
     for page in doc:
-        targets = _collect_targets(page, nsearch, nreplace)
+        targets = _collect_targets(page, nsearch, nreplace, overwrite)
         if not targets:
             continue
         for t in targets:
@@ -235,7 +245,11 @@ def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT):
         used = {f[4] for f in page.get_fonts()}
         name_cache = {}   # 字型檔 → 本頁使用的 refname
         for t in targets:
-            new_text = t["ntext"].replace(nsearch, replace)
+            if overwrite:
+                idx = t["ntext"].find(nsearch)        # 標籤起到段尾整段換掉
+                new_text = t["ntext"][:idx] + replace
+            else:
+                new_text = t["ntext"].replace(nsearch, replace)
             ff = resolve_font_file(t["font"], font_choice)
             if ff:
                 nm = name_cache.get(ff)
@@ -255,14 +269,15 @@ def replace_in_doc(fitz, doc, search, replace, font_choice=AUTO_FONT):
     return total
 
 
-def replace_pdf_file(fitz, src, dst, search, replace, font_choice=AUTO_FONT):
+def replace_pdf_file(fitz, src, dst, search, replace, font_choice=AUTO_FONT,
+                     overwrite=False):
     """讀 src、取代、寫到 dst。回傳取代的 span 數(0 表示沒命中,呼叫端可選擇不輸出)。
 
     先把來源讀進記憶體再開檔(stream),避免長期鎖住原檔 —— 這樣 dst 與 src
     相同(就地覆蓋)時也能安全寫回。"""
     doc = fitz.open(stream=Path(src).read_bytes(), filetype="pdf")
     try:
-        n = replace_in_doc(fitz, doc, search, replace, font_choice)
+        n = replace_in_doc(fitz, doc, search, replace, font_choice, overwrite)
         if n:
             try:
                 doc.subset_fonts()  # 縮小嵌入字型(失敗不影響結果)
@@ -400,6 +415,18 @@ class App:
             sbox,
             text="提示：自動忽略全形／半形差異（全形「：」與半形「:」視為相同）。",
             foreground="#666").pack(anchor="w", padx=8, pady=(0, 4))
+        self.var_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            sbox,
+            text="覆蓋欄位既有值（把「搜尋文字」到該段結尾的舊內容一起換掉）",
+            variable=self.var_overwrite,
+            command=self._on_folder_changed).pack(anchor="w", padx=8)
+        ttk.Label(
+            sbox,
+            text="　用於「標籤：值」欄位更新（例：把舊的列印日期換成新日期），"
+                 "避免新值疊加在舊值前面。只吃到該段文字結尾，"
+                 "若同段後面還有其他內容會一併被覆蓋。",
+            foreground="#666").pack(anchor="w", padx=8, pady=(0, 4))
 
         # 3. 掃描
         act = ttk.Frame(f); act.pack(fill="x", padx=8, pady=2)
@@ -525,8 +552,9 @@ class App:
         self.lbl_status.config(text="掃描中…")
         self.root.update_idletasks()
         replace = self.var_replace.get()
+        overwrite = self.var_overwrite.get()
         for p in pdfs:
-            r = scan_pdf(fitz, str(p), search, replace)
+            r = scan_pdf(fitz, str(p), search, replace, overwrite)
             self.results.append({
                 "path": str(p),
                 "name": p.name,
@@ -610,6 +638,7 @@ class App:
         search = self.var_search.get()
         replace = self.var_replace.get()
         font_choice = self.var_font.get()
+        overwrite = self.var_overwrite.get()
 
         # 來源可能是資料夾或單一檔案 → 取其所在資料夾作為「就地覆蓋」目標
         src = self.var_folder.get().strip()
@@ -641,7 +670,7 @@ class App:
             dst = os.path.join(out_dir, r["name"])
             try:
                 n = replace_pdf_file(
-                    fitz, r["path"], dst, search, replace, font_choice)
+                    fitz, r["path"], dst, search, replace, font_choice, overwrite)
                 if n:
                     done += 1
             except Exception as e:
@@ -676,6 +705,11 @@ HELP_TEXT = """PDF 文字取代 — 使用說明
 說明
   • 自動忽略全形／半形差異：搜尋「列印日期:」也找得到檔案裡的「列印日期：」。
   • 取代後的文字以你輸入的「取代為」原樣寫入，請依需要打全形或半形。
+  • 「覆蓋欄位既有值」：用於更新「標籤：值」這類欄位。勾選後，搜尋打標籤
+    （例「列印日期：」）、取代打整個新內容（例「列印日期：115年6月9日」），
+    工具會把標籤到該段文字結尾的舊內容整段換掉，不論原本是空的或已有舊日期，
+    都不會把新值疊加在舊值前面。注意：只吃到「該段文字（text-run）結尾」，
+    若標籤與舊值被 PDF 拆成不同段，舊值可能不在同段而無法一起換掉。
   • 重寫字型預設「自動」：盡量沿用原 PDF 的字型；找不到對應系統字型時，
     退而使用系統內建中文字型（新細明體等）。
   • 只輸出有命中的檔案；未命中或無文字（掃描影像）的檔案會跳過並在清單標示。
