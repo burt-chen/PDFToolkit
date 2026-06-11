@@ -1,4 +1,9 @@
 __pycache__/
+.manual_video_deps/
+manual_video/_*/
+manual_video/_*.txt
+manual_video/_*.mp4
+manual_video/output/*.mp4
 *.pyc
 *.pyo
 build/
