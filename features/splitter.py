@@ -1366,6 +1366,9 @@ HELP_TEXT = """PDF 切割工具 — 使用說明
   • 自訂組合規則：用一條條「規則」相接組出比對條件（不需懂正則）。
     規則型別：固定文字 / 文字(可指定結尾字) / 數字(可含符號) / 任意文字 / 空白。
     可勾「可省略」「納入檔名」。沿用『同名相鄰才併組』。
+    「空白」= 任意空白字元(半形/全形空白、Tab、換行)的 0 或多個;插一個
+    不會影響原本相連的字。PDF 把欄位排成不同行時,在每個中文/數字規則
+    之間多放一個空白規則最保險。
     內建「地籍謄本」預設：(\\S+區)(\\S+段)(\\S+小段)?\\s*(\\d+(?:-\\d+)*)地號
     注意「小段」與數字間一定要有一個『空白』規則，否則部分 PDF 比對不到。
 
@@ -1434,6 +1437,17 @@ class BlockDialog(tk.Toplevel):
             self.row_chk, text="納入檔名", variable=self.var_infn)
         self.chk_infn.pack(side="left")
 
+        # 「空白」說明(僅當型別 = 空白 時顯示)
+        self.row_space_info = ttk.Frame(self)
+        ttk.Label(
+            self.row_space_info,
+            text=(
+                "「空白」= 任意空白字元(半形/全形空白、Tab、換行)的 0 或多個。\n"
+                "插一個不會影響原本相連的字；當 PDF 把欄位排成不同行時,\n"
+                "在每個中文/數字規則之間多放一個空白規則最保險。"
+            ),
+            foreground="#555", justify="left").pack(anchor="w")
+
         bb = ttk.Frame(self); bb.pack(fill="x", **pad)
         ttk.Button(bb, text="確定", command=self._ok).pack(side="right", padx=4)
         ttk.Button(bb, text="取消", command=self.destroy).pack(side="right")
@@ -1442,7 +1456,8 @@ class BlockDialog(tk.Toplevel):
         self.grab_set()
 
     def _refresh_fields(self):
-        for w in (self.row_value, self.row_ends, self.row_syms, self.row_chk):
+        for w in (self.row_value, self.row_ends, self.row_syms,
+                  self.row_chk, self.row_space_info):
             w.pack_forget()
         t = block_type_key(self.var_type.get())
         if t == "fixed":
@@ -1453,6 +1468,8 @@ class BlockDialog(tk.Toplevel):
             self.row_syms.pack(fill="x", padx=8, pady=4)
         if t != "space":
             self.row_chk.pack(fill="x", padx=8, pady=4)
+        else:
+            self.row_space_info.pack(fill="x", padx=8, pady=4)
 
     def _ok(self):
         t = block_type_key(self.var_type.get())
