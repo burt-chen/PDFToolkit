@@ -46,6 +46,9 @@ SCENE_PLAN = [
     ("09", "replace_scan", 7.0),
     ("10", "replace_compare", 8.0),
     ("11", "replace_finish", 6.0),
+    ("12", "signature_setup", 7.0),
+    ("13", "signature_rule", 7.0),
+    ("14", "signature_preview", 8.0),
 ]
 
 
@@ -105,6 +108,8 @@ def create_samples(fitz) -> dict[str, Path]:
     SAMPLE_DIR.mkdir(exist_ok=True)
     replace_dir = SAMPLE_DIR / "replace_text_samples"
     replace_dir.mkdir(exist_ok=True)
+    signature_dir = SAMPLE_DIR / "digital_signature_samples"
+    signature_dir.mkdir(exist_ok=True)
 
     viewer_pdf = SAMPLE_DIR / "demo_pdf_viewer.pdf"
     split_pdf = SAMPLE_DIR / "demo_pdf_split.pdf"
@@ -171,10 +176,39 @@ def create_samples(fitz) -> dict[str, Path]:
         doc.save(out)
         doc.close()
 
+    from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
+    stamp_png = signature_dir / "demo_stamp.png"
+    stamp = Image.new("RGBA", (360, 150), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(stamp)
+    draw.rounded_rectangle((8, 8, 352, 142), radius=18, outline=(170, 20, 20, 255), width=8)
+    try:
+        font_big = ImageFont.truetype(r"C:\Windows\Fonts\arialbd.ttf", 42)
+        font_small = ImageFont.truetype(r"C:\Windows\Fonts\arial.ttf", 22)
+    except Exception:
+        font_big = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+    draw.text((62, 42), "APPROVED", fill=(170, 20, 20, 255), font=font_big)
+    draw.text((112, 96), "DEMO STAMP", fill=(170, 20, 20, 255), font=font_small)
+    stamp.save(stamp_png)
+
+    signature_pdf = signature_dir / "demo_signature.pdf"
+    doc = fitz.open()
+    for i in range(1, 4):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 90), f"Digital Signature Sample {i}", fontsize=18, fontname="helv")
+        page.insert_text((72, 140), "Approved by", fontsize=14, fontname="helv")
+        page.insert_text((72, 180), "This safe sample demonstrates placing an electronic stamp after searched text.", fontsize=12, fontname="helv")
+        page.insert_text((72, 800), f"Page {i}", fontsize=9, fontname="helv", color=(0.45, 0.45, 0.45))
+    doc.save(signature_pdf)
+    doc.close()
+
     return {
         "viewer": viewer_pdf,
         "splitter": split_pdf,
         "replace_dir": replace_dir,
+        "signature_dir": signature_dir,
+        "stamp": stamp_png,
     }
 
 
@@ -189,6 +223,7 @@ def patch_feature_factories() -> None:
     import tkinter as tk
     import features.splitter as splitter
     import features.replace_text as replace_text
+    import features.digital_signature as digital_signature
 
     def splitter_frame(parent, presets_dir=None):
         frame = ttk.Frame(parent)
@@ -205,8 +240,19 @@ def patch_feature_factories() -> None:
         )
         return frame
 
+    def signature_frame(parent, presets_dir=None, open_in_viewer=None, open_bytes_in_viewer=None):
+        frame = ttk.Frame(parent)
+        frame.app = digital_signature.App(
+            frame,
+            presets_dir=presets_dir,
+            open_in_viewer=open_in_viewer,
+            open_bytes_in_viewer=open_bytes_in_viewer,
+        )
+        return frame
+
     splitter.create_frame = splitter_frame
     replace_text.create_frame = replace_frame
+    digital_signature.create_frame = signature_frame
     _ = tk
 
 
@@ -223,7 +269,7 @@ def launch_app():
         root.state("zoomed")
     except tk.TclError:
         pass
-    app = pdftools.App(root)
+    app = pdftools.App(root, presets_dir=SAMPLE_DIR / "manual_video_settings")
     pump(root, 0.8)
     return root, app
 
@@ -330,6 +376,39 @@ def configure_scene(root, app, samples: dict[str, Path], scene_name: str):
             rep._on_tab_changed()
         else:
             rep.notebook.select(rep.tab_main)
+        pump(root, 1.0)
+        return
+
+    if scene_name in {"signature_setup", "signature_rule", "signature_preview"}:
+        sig = show_feature(root, app, "digital_signature")
+        sig.var_source.set(str(samples["signature_dir"]))
+        sig.var_filter.set("")
+        sig.var_outfolder.set(str(ROOT / "範例" / "digital_signature_output"))
+        sig.var_stamp.set(str(samples["stamp"]))
+        sig.var_placement.set("search")
+        sig.var_search.set("Approved by")
+        sig.var_offset_x.set("10")
+        sig.var_offset_y.set("-16")
+        sig.var_width.set("96")
+        sig.var_height.set("42")
+        sig.var_scope.set("每頁")
+        sig._on_source_changed()
+        if scene_name in {"signature_rule", "signature_preview"}:
+            sig.rules = []
+            sig._add_rule()
+            children = sig.tv_rules.get_children()
+            if children:
+                sig.tv_rules.selection_set(children[0])
+                sig.tv_rules.focus(children[0])
+        if scene_name == "signature_preview":
+            sig._preview()
+            viewer = app._feature_frames.get("viewer")
+            viewer_app = getattr(viewer, "app", None)
+            if viewer_app is not None:
+                viewer_app.var_search.set("")
+                viewer_app._clear_search()
+                if viewer_app.search_visible:
+                    viewer_app._toggle_search()
         pump(root, 1.0)
         return
 
