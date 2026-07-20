@@ -59,6 +59,13 @@ FEATURES = [
         "module": "features.replace_text",
         "factory": "create_frame",
     },
+    {
+        "id": "digital_signature",
+        "name": "電子章",
+        "category": "簽章/用印",
+        "module": "features.digital_signature",
+        "factory": "create_frame",
+    },
 ]
 
 

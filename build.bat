@@ -26,6 +26,7 @@ pyinstaller ^
     --name "PDF工具" ^
     --hidden-import=fitz ^
     --hidden-import=features.splitter ^
+    --hidden-import=features.digital_signature ^
     --collect-binaries=fitz ^
     --clean ^
     pdftools.py
